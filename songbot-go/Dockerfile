@@ -1,4 +1,4 @@
-# Этап 1: Сборка Go-приложения/
+# Этап 1: Сборка Go-приложения/.
 FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
