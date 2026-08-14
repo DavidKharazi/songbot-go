@@ -1,0 +1,11 @@
+# Настройки JetBrains (PyCharm, GoLand и др.)
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Системные файлы и переменные окружения
+.env
+*.exe
+*.bin
+songbot
