@@ -1,33 +1,33 @@
-# Этап 1: Сборка Go-приложения/.
+# ЭТАП 1: Сборка бинарника
 FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
-# Копируем модули и загружаем зависимости
-COPY go.mod ./
-# COPY go.sum ./  (раскомментируйте, если файл go.sum появится)
+# Копируем файлы зависимостей из подпапки
+COPY songbot-go/go.mod ./
+# Если у вас появится go.sum, раскомментируйте строчку ниже:
+# COPY songbot-go/go.sum ./
+
 RUN go mod download
 
-# Копируем исходный код
-COPY . .
+# Копируем весь исходный код из подпапки
+COPY songbot-go/ .
 
-# Собираем исполняемый файл
-RUN CGO_ENABLED=0 GOOS=linux go build -o songbot ./main.go
+# Собираем бинарник под Linux
+RUN CGO_ENABLED=0 GOOS=linux go build -o songbot .
 
-# Этап 2: Минимальный финальный образ
+# ЭТАП 2: Легковесный образ для запуска
 FROM alpine:latest
 
-# Устанавливаем сертификаты для работы HTTPS (Telegram и Gemini API)
+WORKDIR /app
+
+# Устанавливаем сертификаты для работы HTTPS/Telegram API
 RUN apk --no-cache add ca-certificates
 
-WORKDIR /root/
-
-# Копируем бинарник из первого этапа
+# Копируем собранный бинарник и необходимые папки с файлами
 COPY --from=builder /app/songbot .
-
-# Копируем папки с песнями и аккордами
-COPY --from=builder /app/chords ./chords
 COPY --from=builder /app/songs ./songs
-COPY --from=builder /app/internal/songs ./internal/songs
+COPY --from=builder /app/chords ./chords
 
+# Запускаем бота
 CMD ["./songbot"]
