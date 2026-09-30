@@ -13,10 +13,15 @@ import (
 
 const defaultModel = "gemini-2.5-flash"
 
+// maxConcurrent — сколько запросов к Gemini может выполняться одновременно.
+// Остальные ждут своей очереди, чтобы не упереться в лимиты API (ошибка 429).
+const maxConcurrent = 5
+
 type Client struct {
 	apiKey string
 	model  string
 	http   *http.Client
+	sem    chan struct{} // семафор: ограничивает число одновременных запросов
 }
 
 // New создаёт клиента Gemini. Если model пустая строка, используется defaultModel.
@@ -30,6 +35,7 @@ func New(apiKey, model string) *Client {
 		apiKey: apiKey,
 		model:  model,
 		http:   &http.Client{Timeout: 60 * time.Second},
+		sem:    make(chan struct{}, maxConcurrent),
 	}
 }
 
@@ -52,7 +58,11 @@ type generateResponse struct {
 }
 
 // Generate отправляет prompt модели Gemini и возвращает сгенерированный текст.
+// Безопасен для вызова из нескольких горутин одновременно.
 func (c *Client) Generate(prompt string) (string, error) {
+	c.sem <- struct{}{}
+	defer func() { <-c.sem }()
+
 	url := fmt.Sprintf(
 		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
 		c.model, c.apiKey,

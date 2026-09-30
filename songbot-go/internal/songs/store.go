@@ -6,8 +6,10 @@ package songs
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 
 	"songbot/internal/docxread"
@@ -31,19 +33,48 @@ func Load(songsDir, chordsDir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".docx") {
-			continue
+
+	// .docx разбираются параллельно пулом воркеров (по числу ядер CPU).
+	// Карты lyrics/files заполняет только текущая горутина, поэтому мьютекс не нужен.
+	type parsed struct{ title, path, text string }
+	jobs := make(chan string)
+	results := make(chan parsed)
+
+	var wg sync.WaitGroup
+	for i := 0; i < runtime.NumCPU(); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for full := range jobs {
+				text, err := docxread.ExtractText(full)
+				if err != nil {
+					// Пропускаем повреждённый файл, но не роняем весь бот.
+					continue
+				}
+				name := filepath.Base(full)
+				results <- parsed{title: strings.TrimSuffix(name, filepath.Ext(name)), path: full, text: text}
+			}
+		}()
+	}
+
+	go func() {
+		for _, e := range entries {
+			if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".docx") {
+				continue
+			}
+			jobs <- filepath.Join(songsDir, e.Name())
 		}
-		full := filepath.Join(songsDir, e.Name())
-		text, err := docxread.ExtractText(full)
-		if err != nil {
-			// Пропускаем повреждённый файл, но не роняем весь бот.
-			continue
-		}
-		title := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
-		lyrics[title] = text
-		files[title] = full
+		close(jobs)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	for r := range results {
+		lyrics[r.title] = r.text
+		files[r.title] = r.path
 	}
 
 	titles := make([]string, 0, len(lyrics))

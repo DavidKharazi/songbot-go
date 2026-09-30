@@ -1,11 +1,13 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"songbot/internal/gemini"
 	"songbot/internal/songs"
@@ -20,9 +22,19 @@ type Bot struct {
 
 	indexOf map[string]int // название песни -> позиция в store.Titles (для компактных callback_data)
 
+	catalog string // все песни одной строкой для запроса к Gemini (собирается один раз)
+
 	mu    sync.Mutex
 	pages map[int64]int // chatID -> текущая позиция постраничного списка "Все песни"
+
+	sem       chan struct{}  // ограничивает число одновременно обрабатываемых обновлений
+	chatLocks sync.Map       // chatID -> *sync.Mutex: обновления одного чата обрабатываются по одному
+	fileIDs   sync.Map       // путь к файлу -> file_id в Telegram (чтобы не загружать файл повторно)
+	wg        sync.WaitGroup // незавершённые обработчики — ждём их при остановке
 }
+
+// maxConcurrentUpdates — сколько обновлений (от разных пользователей) обрабатывается одновременно.
+const maxConcurrentUpdates = 32
 
 // New создаёт бота поверх уже загруженного хранилища песен.
 func New(token string, store *songs.Store, geminiClient *gemini.Client) *Bot {
@@ -35,25 +47,70 @@ func New(token string, store *songs.Store, geminiClient *gemini.Client) *Bot {
 		store:   store,
 		gemini:  geminiClient,
 		indexOf: indexOf,
+		catalog: buildCatalog(store),
 		pages:   map[int64]int{},
+		sem:     make(chan struct{}, maxConcurrentUpdates),
 	}
 }
 
-// Run запускает бесконечный цикл long polling.
-func (b *Bot) Run() error {
+// buildCatalog склеивает названия и тексты всех песен для промпта Gemini.
+func buildCatalog(store *songs.Store) string {
+	var sb strings.Builder
+	for _, title := range store.Titles {
+		sb.WriteString("Название: ")
+		sb.WriteString(title)
+		sb.WriteString("\nТекст песни:\n")
+		sb.WriteString(store.Lyrics[title])
+		sb.WriteString("\n---\n")
+	}
+	return sb.String()
+}
+
+// Run запускает цикл long polling. Каждое обновление обрабатывается в отдельной горутине,
+// поэтому долгий запрос к Gemini одного пользователя не задерживает остальных.
+// При отмене ctx новые обновления больше не принимаются, а Run дожидается
+// завершения уже запущенных обработчиков.
+func (b *Bot) Run(ctx context.Context) error {
 	var offset int64
 	log.Println("Бот запущен, ожидаю обновления...")
 	for {
-		updates, err := b.tg.GetUpdates(offset, 60)
+		updates, err := b.tg.GetUpdates(ctx, offset, 60)
+		if ctx.Err() != nil {
+			log.Println("остановка: жду завершения обработчиков...")
+			b.wg.Wait()
+			// Подтверждаем Telegram уже обработанные обновления, иначе после перезапуска
+			// бот получит их повторно и ответит пользователям второй раз.
+			confirmCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, err := b.tg.GetUpdates(confirmCtx, offset, 0)
+			cancel()
+			if err != nil {
+				log.Printf("не удалось подтвердить обновления при остановке: %v", err)
+			}
+			return nil
+		}
 		if err != nil {
 			log.Printf("ошибка getUpdates: %v", err)
+			time.Sleep(time.Second) // не крутим цикл вхолостую, если нет сети
 			continue
 		}
 		for _, u := range updates {
 			offset = u.UpdateID + 1
-			b.dispatch(u)
+			b.sem <- struct{}{} // если все слоты заняты — ждём, пока какой-то обработчик освободится
+			b.wg.Add(1)
+			go func(u tg.Update) {
+				defer b.wg.Done()
+				defer func() { <-b.sem }()
+				b.dispatch(u)
+			}(u)
 		}
 	}
+}
+
+// chatLock возвращает мьютекс чата: пока обрабатывается одно обновление пользователя,
+// следующее от него же ждёт — так ответы в одном чате не перемешиваются.
+func (b *Bot) chatLock(chatID int64) *sync.Mutex {
+	m, _ := b.chatLocks.LoadOrStore(chatID, &sync.Mutex{})
+	return m.(*sync.Mutex)
 }
 
 func (b *Bot) dispatch(u tg.Update) {
@@ -65,9 +122,24 @@ func (b *Bot) dispatch(u tg.Update) {
 
 	switch {
 	case u.Message != nil:
+		l := b.chatLock(u.Message.Chat.ID)
+		l.Lock()
+		defer l.Unlock()
 		b.handleMessage(u.Message)
 	case u.CallbackQuery != nil:
-		b.handleCallback(u.CallbackQuery)
+		cq := u.CallbackQuery
+		// Отвечаем на нажатие сразу, не дожидаясь блокировки чата, — иначе у пользователя
+		// будут крутиться «часики» на кнопке, пока идёт предыдущий запрос к Gemini.
+		if err := b.tg.AnswerCallbackQuery(cq.ID); err != nil {
+			log.Printf("AnswerCallbackQuery: %v", err)
+		}
+		if cq.Message == nil {
+			return
+		}
+		l := b.chatLock(cq.Message.Chat.ID)
+		l.Lock()
+		defer l.Unlock()
+		b.handleCallback(cq)
 	}
 }
 
@@ -162,15 +234,6 @@ func (b *Bot) handleSearch(chatID int64, query string) {
 }
 
 func (b *Bot) searchWithGemini(query string) (string, error) {
-	var sb strings.Builder
-	for _, title := range b.store.Titles {
-		sb.WriteString("Название: ")
-		sb.WriteString(title)
-		sb.WriteString("\nТекст песни:\n")
-		sb.WriteString(b.store.Lyrics[title])
-		sb.WriteString("\n---\n")
-	}
-
 	prompt := fmt.Sprintf(`Ты — помощник для поиска песен в базе данных церковных песен.
 
 Вот запрос пользователя: "%s"
@@ -191,7 +254,7 @@ func (b *Bot) searchWithGemini(query string) (string, error) {
 3. Если не найдено подходящих песен, так и скажи
 4. Не используй markdown в ответе, но используй абзацы и эмодзи.
 
-Отвечай кратко и по существу.`, query, sb.String())
+Отвечай кратко и по существу.`, query, b.catalog)
 
 	return b.gemini.Generate(prompt)
 }
@@ -212,7 +275,7 @@ func (b *Bot) sendSong(chatID int64, title string) {
 	}
 
 	if docPath, ok := b.store.Files[title]; ok {
-		if err := b.tg.SendDocument(chatID, docPath, "📄 Текст песни"); err != nil {
+		if err := b.sendFile(chatID, docPath, "📄 Текст песни"); err != nil {
 			log.Printf("sendSong docx: %v", err)
 			if _, e := b.tg.SendMessage(chatID, fmt.Sprintf("Файл %s.docx не найден.", title), nil); e != nil {
 				log.Printf("sendSong docx notify: %v", e)
@@ -221,7 +284,7 @@ func (b *Bot) sendSong(chatID int64, title string) {
 	}
 
 	if chordPath, ok := b.store.Chords[title]; ok {
-		if err := b.tg.SendDocument(chatID, chordPath, "🎸 Аккорды"); err != nil {
+		if err := b.sendFile(chatID, chordPath, "🎸 Аккорды"); err != nil {
 			log.Printf("sendSong chords: %v", err)
 		}
 	} else {
@@ -234,6 +297,27 @@ func (b *Bot) sendSong(chatID int64, title string) {
 	if _, err := b.tg.SendMessage(chatID, "Еще ⤵:", afterSongKeyboard(idx)); err != nil {
 		log.Printf("sendSong nav: %v", err)
 	}
+}
+
+// sendFile отправляет файл с диска. После первой загрузки Telegram возвращает file_id,
+// и все последующие отправки того же файла идут по нему — без повторной загрузки.
+func (b *Bot) sendFile(chatID int64, path, caption string) error {
+	if id, ok := b.fileIDs.Load(path); ok {
+		err := b.tg.SendDocumentByFileID(chatID, id.(string), caption)
+		if err == nil {
+			return nil
+		}
+		log.Printf("отправка по file_id не удалась, загружаю файл заново: %v", err)
+		b.fileIDs.Delete(path)
+	}
+	fileID, err := b.tg.SendDocument(chatID, path, caption)
+	if err != nil {
+		return err
+	}
+	if fileID != "" {
+		b.fileIDs.Store(path, fileID)
+	}
+	return nil
 }
 
 func (b *Bot) sendBibleVerse(chatID int64, title string) {
@@ -291,13 +375,9 @@ func (b *Bot) spiritualGuidanceAndVerse(title, lyrics string) (string, string, e
 	return parts[0], "Не удалось найти подходящий стих.", nil
 }
 
+// handleCallback обрабатывает нажатие инлайн-кнопки. AnswerCallbackQuery и проверка
+// cq.Message != nil уже выполнены в dispatch.
 func (b *Bot) handleCallback(cq *tg.CallbackQuery) {
-	if err := b.tg.AnswerCallbackQuery(cq.ID); err != nil {
-		log.Printf("AnswerCallbackQuery: %v", err)
-	}
-	if cq.Message == nil {
-		return
-	}
 	chatID := cq.Message.Chat.ID
 	msgID := cq.Message.MessageID
 	data := cq.Data
