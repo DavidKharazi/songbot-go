@@ -4,6 +4,7 @@ package telegram
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,11 +40,22 @@ type apiResponse struct {
 
 // callJSON вызывает метод API, отправляя payload как JSON, и декодирует result в out.
 func (b *Bot) callJSON(method string, payload interface{}, out interface{}) error {
+	return b.callJSONCtx(context.Background(), method, payload, out)
+}
+
+// callJSONCtx — то же, что callJSON, но запрос прерывается при отмене ctx
+// (нужно для long polling, чтобы бот мог быстро остановиться).
+func (b *Bot) callJSONCtx(ctx context.Context, method string, payload interface{}, out interface{}) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	resp, err := b.client.Post(b.base+"/"+method, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.base+"/"+method, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := b.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -81,9 +93,16 @@ type User struct {
 }
 
 type Message struct {
-	MessageID int    `json:"message_id"`
-	Chat      Chat   `json:"chat"`
-	Text      string `json:"text,omitempty"`
+	MessageID int       `json:"message_id"`
+	Chat      Chat      `json:"chat"`
+	Text      string    `json:"text,omitempty"`
+	Document  *Document `json:"document,omitempty"`
+}
+
+// Document — файл, отправленный в Telegram. FileID можно переиспользовать
+// для повторной отправки без загрузки файла заново.
+type Document struct {
+	FileID string `json:"file_id"`
 }
 
 type CallbackQuery struct {
@@ -123,14 +142,14 @@ type KeyboardButton struct {
 
 // ---------- Методы API ----------
 
-// GetUpdates забирает обновления через long polling.
-func (b *Bot) GetUpdates(offset int64, timeout int) ([]Update, error) {
+// GetUpdates забирает обновления через long polling. Запрос прерывается при отмене ctx.
+func (b *Bot) GetUpdates(ctx context.Context, offset int64, timeout int) ([]Update, error) {
 	payload := map[string]interface{}{
 		"offset":  offset,
 		"timeout": timeout,
 	}
 	var updates []Update
-	if err := b.callJSON("getUpdates", payload, &updates); err != nil {
+	if err := b.callJSONCtx(ctx, "getUpdates", payload, &updates); err != nil {
 		return nil, err
 	}
 	return updates, nil
@@ -182,11 +201,25 @@ func (b *Bot) AnswerCallbackQuery(callbackID string) error {
 	return b.callJSON("answerCallbackQuery", payload, nil)
 }
 
-// SendDocument отправляет файл с диска (multipart/form-data).
-func (b *Bot) SendDocument(chatID int64, filePath string, caption string) error {
+// SendDocumentByFileID отправляет уже загруженный ранее в Telegram файл по его file_id —
+// без повторной загрузки содержимого, поэтому это почти мгновенно.
+func (b *Bot) SendDocumentByFileID(chatID int64, fileID string, caption string) error {
+	payload := map[string]interface{}{
+		"chat_id":  chatID,
+		"document": fileID,
+	}
+	if caption != "" {
+		payload["caption"] = caption
+	}
+	return b.callJSON("sendDocument", payload, nil)
+}
+
+// SendDocument отправляет файл с диска (multipart/form-data) и возвращает его file_id,
+// который можно передать в SendDocumentByFileID для последующих отправок.
+func (b *Bot) SendDocument(chatID int64, filePath string, caption string) (string, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer f.Close()
 
@@ -194,48 +227,52 @@ func (b *Bot) SendDocument(chatID int64, filePath string, caption string) error 
 	w := multipart.NewWriter(buf)
 
 	if err := w.WriteField("chat_id", fmt.Sprintf("%d", chatID)); err != nil {
-		return err
+		return "", err
 	}
 	if caption != "" {
 		if err := w.WriteField("caption", caption); err != nil {
-			return err
+			return "", err
 		}
 	}
 	part, err := w.CreateFormFile("document", filepath.Base(filePath))
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, err := io.Copy(part, f); err != nil {
-		return err
+		return "", err
 	}
 	if err := w.Close(); err != nil {
-		return err
+		return "", err
 	}
 
 	req, err := http.NewRequest(http.MethodPost, b.base+"/sendDocument", buf)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Content-Type", w.FormDataContentType())
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var ar apiResponse
 	if err := json.Unmarshal(raw, &ar); err != nil {
-		return fmt.Errorf("не удалось разобрать ответ sendDocument: %w", err)
+		return "", fmt.Errorf("не удалось разобрать ответ sendDocument: %w", err)
 	}
 	if !ar.OK {
-		return fmt.Errorf("не удалось отправить файл %s: %s", filePath, ar.Description)
+		return "", fmt.Errorf("не удалось отправить файл %s: %s", filePath, ar.Description)
 	}
-	return nil
+	var msg Message
+	if err := json.Unmarshal(ar.Result, &msg); err != nil || msg.Document == nil {
+		return "", nil // файл отправлен, просто не удалось получить file_id — не ошибка
+	}
+	return msg.Document.FileID, nil
 }
 
 // EscapeCallback безопасно готовит строку для query-параметра (не используется Telegram напрямую,

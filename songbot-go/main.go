@@ -3,9 +3,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"songbot/internal/bot"
 	"songbot/internal/gemini"
@@ -33,7 +36,12 @@ func main() {
 	geminiClient := gemini.New(googleAPIKey, os.Getenv("GEMINI_MODEL"))
 	b := bot.New(token, store, geminiClient)
 
-	if err := b.Run(); err != nil {
+	// Ctrl+C или SIGTERM (например, docker stop) отменяет ctx: бот перестаёт принимать
+	// новые обновления и дожидается, пока допишутся уже начатые ответы.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := b.Run(ctx); err != nil {
 		log.Fatalf("бот остановлен с ошибкой: %v", err)
 	}
 }
