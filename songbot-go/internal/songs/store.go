@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"songbot/internal/docxread"
+	"songbot/internal/pdftext"
 )
 
 // Store хранит все загруженные песни и аккорды, а также стабильный отсортированный
@@ -22,6 +23,15 @@ type Store struct {
 	Lyrics map[string]string // название -> текст песни
 	Chords map[string]string // название -> путь к pdf с аккордами
 	Files  map[string]string // название -> путь к исходному .docx (для пересылки файлом)
+
+	// ChordTexts — название -> текст с аккордами над словами (из chords/txt/*.txt).
+	// Есть только у песен, чей PDF удалось перевести в текст.
+	ChordTexts map[string]string
+}
+
+// ChordTextDir — папка с текстовыми версиями PDF с аккордами.
+func ChordTextDir(chordsDir string) string {
+	return filepath.Join(chordsDir, "txt")
 }
 
 // Load читает все .docx из songsDir и все .pdf из chordsDir и связывает их между собой.
@@ -109,7 +119,14 @@ func Load(songsDir, chordsDir string) (*Store, error) {
 		}
 	}
 
-	return &Store{Titles: titles, Lyrics: lyrics, Chords: chords, Files: files}, nil
+	chordTexts := map[string]string{}
+	for title, pdf := range chords {
+		if b, err := os.ReadFile(pdftext.TxtPath(ChordTextDir(chordsDir), pdf)); err == nil {
+			chordTexts[title] = string(b)
+		}
+	}
+
+	return &Store{Titles: titles, Lyrics: lyrics, Chords: chords, Files: files, ChordTexts: chordTexts}, nil
 }
 
 // cleanForMatch оставляет только буквы/цифры/пробелы и переводит в нижний регистр,

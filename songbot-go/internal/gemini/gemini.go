@@ -4,6 +4,8 @@ package gemini
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,7 +50,14 @@ type content struct {
 }
 
 type part struct {
-	Text string `json:"text"`
+	Text       string      `json:"text,omitempty"`
+	InlineData *inlineData `json:"inlineData,omitempty"`
+}
+
+// inlineData — файл (например, PDF), переданный прямо в запросе в base64.
+type inlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
 }
 
 type generateResponse struct {
@@ -60,20 +69,48 @@ type generateResponse struct {
 // Generate отправляет prompt модели Gemini и возвращает сгенерированный текст.
 // Безопасен для вызова из нескольких горутин одновременно.
 func (c *Client) Generate(prompt string) (string, error) {
-	c.sem <- struct{}{}
+	return c.generate(context.Background(), []part{{Text: prompt}})
+}
+
+// ExtractChordsFromPDF распознаёт PDF-скан с текстом песни и аккордами и возвращает
+// его как обычный текст, где аккорды стоят строкой над словами.
+func (c *Client) ExtractChordsFromPDF(ctx context.Context, pdf []byte) (string, error) {
+	const prompt = `Это скан листа с текстом христианской песни и гитарными аккордами.
+Перепиши его как обычный текст:
+- аккорды пиши отдельной строкой НАД словами, выравнивая пробелами так, чтобы каждый аккорд
+  стоял над тем слогом, над которым он стоит на скане;
+- сохрани названия частей (Куплет, Припев, Проигрыш и т.п.) и пустые строки между ними;
+- аккорды пиши латиницей ровно так, как на скане (H, B, Hm, F#m, D/F# и т.д.);
+- ничего не добавляй от себя, не используй markdown и не пиши пояснений.`
+	return c.generate(ctx, []part{
+		{InlineData: &inlineData{MimeType: "application/pdf", Data: base64.StdEncoding.EncodeToString(pdf)}},
+		{Text: prompt},
+	})
+}
+
+func (c *Client) generate(ctx context.Context, parts []part) (string, error) {
+	select {
+	case c.sem <- struct{}{}:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 	defer func() { <-c.sem }()
 
-	url := fmt.Sprintf(
-		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
-		c.model, c.apiKey,
-	)
+	// Ключ передаётся заголовком, а не в URL: URL попадает в текст сетевых ошибок и в логи.
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", c.model)
 
-	body, err := json.Marshal(generateRequest{Contents: []content{{Parts: []part{{Text: prompt}}}}})
+	body, err := json.Marshal(generateRequest{Contents: []content{{Parts: parts}}})
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := c.http.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", c.apiKey)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("запрос к Gemini API не выполнен: %w", err)
 	}
