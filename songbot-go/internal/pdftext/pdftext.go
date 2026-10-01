@@ -92,13 +92,10 @@ func Convert(ctx context.Context, pdfDir, txtDir string, ocr OCR) error {
 }
 
 func convertOne(ctx context.Context, pdf, txt string, ocr OCR) error {
-	var stdout bytes.Buffer
-	cmd := exec.CommandContext(ctx, "pdftotext", "-layout", "-enc", "UTF-8", pdf, "-")
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("pdftotext: %w", err)
+	text, err := extractText(ctx, pdf)
+	if err != nil {
+		return err
 	}
-	text := Clean(stdout.String())
 
 	if len([]rune(strings.Join(strings.Fields(text), ""))) < 20 {
 		// Текста почти нет — значит, это скан. Пробуем распознать.
@@ -122,6 +119,30 @@ func convertOne(ctx context.Context, pdf, txt string, ocr OCR) error {
 	return os.WriteFile(txt, []byte(text+"\n"), 0o644)
 }
 
+// extractText достаёт текст из PDF. Основной способ — раскладка по точным координатам
+// слов (-bbox-layout), чтобы аккорды стояли над нужными буквами; если он не сработал,
+// используется обычный режим -layout.
+func extractText(ctx context.Context, pdf string) (string, error) {
+	var bbox bytes.Buffer
+	cmd := exec.CommandContext(ctx, "pdftotext", "-bbox-layout", "-enc", "UTF-8", pdf, "-")
+	cmd.Stdout = &bbox
+	if err := cmd.Run(); err == nil {
+		if text, err := layoutFromBBox(bbox.Bytes()); err == nil {
+			return Clean(text), nil
+		} else {
+			log.Printf("%s: не удалось разобрать координаты слов, использую -layout: %v", filepath.Base(pdf), err)
+		}
+	}
+
+	var stdout bytes.Buffer
+	cmd = exec.CommandContext(ctx, "pdftotext", "-layout", "-enc", "UTF-8", pdf, "-")
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("pdftotext: %w", err)
+	}
+	return Clean(stdout.String()), nil
+}
+
 var (
 	fenceRe     = regexp.MustCompile("(?m)^```[a-z]*\\s*$")
 	manyBlankRe = regexp.MustCompile(`\n{3,}`)
@@ -134,7 +155,9 @@ func Clean(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\f", "\n")
 	text = strings.ReplaceAll(text, "\t", "    ")
-	text = strings.ReplaceAll(text, " ", " ")
+	text = strings.ReplaceAll(text, "\u00a0", " ") // неразрывный пробел
+	// Некоторые PDF вместо «ё» содержат похожие «ѐ»/«Ѐ» (е с ударением).
+	text = strings.NewReplacer("ѐ", "ё", "Ѐ", "Ё").Replace(text)
 	text = chords.StripFormatChars(text)
 
 	lines := strings.Split(text, "\n")
