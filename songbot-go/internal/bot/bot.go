@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"songbot/internal/chords"
 	"songbot/internal/gemini"
 	"songbot/internal/songs"
 	tg "songbot/internal/telegram"
@@ -23,6 +24,8 @@ type Bot struct {
 	indexOf map[string]int // название песни -> позиция в store.Titles (для компактных callback_data)
 
 	catalog string // все песни одной строкой для запроса к Gemini (собирается один раз)
+
+	chordSongs map[string]*chords.Song // название -> разобранный текст с аккордами (для транспонирования)
 
 	mu    sync.Mutex
 	pages map[int64]int // chatID -> текущая позиция постраничного списка "Все песни"
@@ -43,13 +46,14 @@ func New(token string, store *songs.Store, geminiClient *gemini.Client) *Bot {
 		indexOf[t] = i
 	}
 	return &Bot{
-		tg:      tg.New(token),
-		store:   store,
-		gemini:  geminiClient,
-		indexOf: indexOf,
-		catalog: buildCatalog(store),
-		pages:   map[int64]int{},
-		sem:     make(chan struct{}, maxConcurrentUpdates),
+		tg:         tg.New(token),
+		store:      store,
+		gemini:     geminiClient,
+		indexOf:    indexOf,
+		catalog:    buildCatalog(store),
+		chordSongs: parseChordSongs(store.ChordTexts, store.Chords),
+		pages:      map[int64]int{},
+		sem:        make(chan struct{}, maxConcurrentUpdates),
 	}
 }
 
@@ -294,7 +298,7 @@ func (b *Bot) sendSong(chatID int64, title string) {
 	}
 
 	idx := b.indexOf[title]
-	if _, err := b.tg.SendMessage(chatID, "Еще ⤵:", afterSongKeyboard(idx)); err != nil {
+	if _, err := b.tg.SendMessage(chatID, "Еще ⤵:", b.afterSongKeyboard(idx)); err != nil {
 		log.Printf("sendSong nav: %v", err)
 	}
 }
@@ -333,7 +337,7 @@ func (b *Bot) sendBibleVerse(chatID int64, title string) {
 			log.Printf("sendBibleVerse fail notify: %v", e)
 		}
 		idx := b.indexOf[title]
-		if _, e := b.tg.SendMessage(chatID, "Еще ⤵:", afterSongKeyboard(idx)); e != nil {
+		if _, e := b.tg.SendMessage(chatID, "Еще ⤵:", b.afterSongKeyboard(idx)); e != nil {
 			log.Printf("sendBibleVerse nav: %v", e)
 		}
 		return
@@ -347,7 +351,7 @@ func (b *Bot) sendBibleVerse(chatID int64, title string) {
 	}
 
 	idx := b.indexOf[title]
-	if _, err := b.tg.SendMessage(chatID, "Еще ⤵:", afterSongKeyboard(idx)); err != nil {
+	if _, err := b.tg.SendMessage(chatID, "Еще ⤵:", b.afterSongKeyboard(idx)); err != nil {
 		log.Printf("sendBibleVerse nav: %v", err)
 	}
 }
@@ -414,6 +418,23 @@ func (b *Bot) handleCallback(cq *tg.CallbackQuery) {
 			log.Printf("delete song list message: %v", err)
 		}
 		b.sendSong(chatID, title)
+	case strings.HasPrefix(data, "chords|"):
+		idx := parseIntOr(strings.TrimPrefix(data, "chords|"), -1)
+		if b.titleByIndex(idx) == "" {
+			return
+		}
+		b.sendChords(chatID, idx)
+	case strings.HasPrefix(data, "tr|"):
+		// tr|<индекс песни>|<сдвиг>
+		f := strings.Split(data, "|")
+		if len(f) != 3 {
+			return
+		}
+		idx := parseIntOr(f[1], -1)
+		if b.titleByIndex(idx) == "" {
+			return
+		}
+		b.editChords(chatID, msgID, idx, parseIntOr(f[2], 0))
 	case strings.HasPrefix(data, "bible|"):
 		idx := parseIntOr(strings.TrimPrefix(data, "bible|"), -1)
 		title := b.titleByIndex(idx)

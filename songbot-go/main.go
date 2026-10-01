@@ -12,6 +12,7 @@ import (
 
 	"songbot/internal/bot"
 	"songbot/internal/gemini"
+	"songbot/internal/pdftext"
 	"songbot/internal/songs"
 )
 
@@ -27,19 +28,26 @@ func main() {
 		log.Fatal("не задана переменная окружения GOOGLE_API_KEY")
 	}
 
-	store, err := songs.Load("songs", "chords")
-	if err != nil {
-		log.Fatalf("не удалось загрузить песни: %v", err)
-	}
-	log.Printf("загружено песен: %d, файлов аккордов: %d", len(store.Titles), len(store.Chords))
-
-	geminiClient := gemini.New(googleAPIKey, os.Getenv("GEMINI_MODEL"))
-	b := bot.New(token, store, geminiClient)
-
 	// Ctrl+C или SIGTERM (например, docker stop) отменяет ctx: бот перестаёт принимать
 	// новые обновления и дожидается, пока допишутся уже начатые ответы.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	geminiClient := gemini.New(googleAPIKey, os.Getenv("GEMINI_MODEL"))
+
+	// PDF с аккордами -> текст (для транспонирования). Уже готовые .txt не пересоздаются.
+	if err := pdftext.Convert(ctx, "chords", songs.ChordTextDir("chords"), geminiClient); err != nil {
+		log.Printf("не удалось перевести аккорды в текст: %v", err)
+	}
+
+	store, err := songs.Load("songs", "chords")
+	if err != nil {
+		log.Fatalf("не удалось загрузить песни: %v", err)
+	}
+	log.Printf("загружено песен: %d, файлов аккордов: %d, из них текстом: %d",
+		len(store.Titles), len(store.Chords), len(store.ChordTexts))
+
+	b := bot.New(token, store, geminiClient)
 
 	if err := b.Run(ctx); err != nil {
 		log.Fatalf("бот остановлен с ошибкой: %v", err)

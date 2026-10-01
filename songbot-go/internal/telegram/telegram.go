@@ -157,9 +157,22 @@ func (b *Bot) GetUpdates(ctx context.Context, offset int64, timeout int) ([]Upda
 
 // SendMessage отправляет текстовое сообщение, опционально с клавиатурой.
 func (b *Bot) SendMessage(chatID int64, text string, markup interface{}) (*Message, error) {
+	return b.sendMessage(chatID, text, "", markup)
+}
+
+// SendMessageHTML отправляет сообщение с HTML-разметкой (<b>, <pre> и т.п.).
+// Спецсимволы &, <, > в тексте нужно экранировать через html.EscapeString.
+func (b *Bot) SendMessageHTML(chatID int64, text string, markup interface{}) (*Message, error) {
+	return b.sendMessage(chatID, text, "HTML", markup)
+}
+
+func (b *Bot) sendMessage(chatID int64, text, parseMode string, markup interface{}) (*Message, error) {
 	payload := map[string]interface{}{
 		"chat_id": chatID,
 		"text":    text,
+	}
+	if parseMode != "" {
+		payload["parse_mode"] = parseMode
 	}
 	if markup != nil {
 		payload["reply_markup"] = markup
@@ -173,10 +186,22 @@ func (b *Bot) SendMessage(chatID int64, text string, markup interface{}) (*Messa
 
 // EditMessageText редактирует текст ранее отправленного сообщения.
 func (b *Bot) EditMessageText(chatID int64, messageID int, text string, markup *InlineKeyboardMarkup) error {
+	return b.editMessageText(chatID, messageID, text, "", markup)
+}
+
+// EditMessageTextHTML редактирует сообщение с HTML-разметкой.
+func (b *Bot) EditMessageTextHTML(chatID int64, messageID int, text string, markup *InlineKeyboardMarkup) error {
+	return b.editMessageText(chatID, messageID, text, "HTML", markup)
+}
+
+func (b *Bot) editMessageText(chatID int64, messageID int, text, parseMode string, markup *InlineKeyboardMarkup) error {
 	payload := map[string]interface{}{
 		"chat_id":    chatID,
 		"message_id": messageID,
 		"text":       text,
+	}
+	if parseMode != "" {
+		payload["parse_mode"] = parseMode
 	}
 	if markup != nil {
 		payload["reply_markup"] = markup

@@ -78,16 +78,22 @@ func allSongsPageKeyboard(allTitles []string, indexOf map[string]int, start int)
 	return tg.InlineKeyboardMarkup{InlineKeyboard: rows}, end
 }
 
-// afterSongKeyboard — клавиатура после отправки песни. Кнопка "Аккорды" больше не нужна,
-// т.к. файл с аккордами теперь отправляется сразу вместе с текстом песни.
-func afterSongKeyboard(songIndex int) tg.InlineKeyboardMarkup {
-	return tg.InlineKeyboardMarkup{
-		InlineKeyboard: [][]tg.InlineKeyboardButton{
-			{{Text: "✝️ Библейский стих к песне", CallbackData: fmt.Sprintf("bible|%d", songIndex)}},
-			{{Text: "🗂️ Каталог по алфавиту", CallbackData: "menu"}},
-			{{Text: "🎼 Все песни", CallbackData: "all_songs"}},
-		},
+// afterSongKeyboard — клавиатура после отправки песни. Файл с аккордами отправляется
+// сразу вместе с текстом песни, а если аккорды есть и в текстовом виде — добавляется
+// кнопка, которая присылает их текстом с возможностью транспонировать.
+func (b *Bot) afterSongKeyboard(songIndex int) tg.InlineKeyboardMarkup {
+	var rows [][]tg.InlineKeyboardButton
+	if _, ok := b.chordSongs[b.titleByIndex(songIndex)]; ok {
+		rows = append(rows, []tg.InlineKeyboardButton{
+			{Text: "🎸 Аккорды текстом / транспонировать", CallbackData: fmt.Sprintf("chords|%d", songIndex)},
+		})
 	}
+	rows = append(rows,
+		[]tg.InlineKeyboardButton{{Text: "✝️ Библейский стих к песне", CallbackData: fmt.Sprintf("bible|%d", songIndex)}},
+		[]tg.InlineKeyboardButton{{Text: "🗂️ Каталог по алфавиту", CallbackData: "menu"}},
+		[]tg.InlineKeyboardButton{{Text: "🎼 Все песни", CallbackData: "all_songs"}},
+	)
+	return tg.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 // navKeyboard — простая клавиатура возврата в каталог/список песен.

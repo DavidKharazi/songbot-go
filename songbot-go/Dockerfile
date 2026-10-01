@@ -21,8 +21,9 @@ FROM alpine:latest
 
 WORKDIR /app
 
-# Устанавливаем сертификаты для работы HTTPS/Telegram API
-RUN apk --no-cache add ca-certificates
+# Сертификаты для HTTPS (Telegram, Gemini) и pdftotext (poppler-utils) —
+# им бот переводит PDF с аккордами в текст для транспонирования
+RUN apk --no-cache add ca-certificates poppler-utils
 
 # Копируем собранный бинарник и необходимые папки с файлами
 COPY --from=builder /app/songbot .
