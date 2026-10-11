@@ -23,6 +23,15 @@
       --accent: #4c8ff0; --chord: #ffa94d;
     }
   }
+  /* Тема, выбранная кнопкой, перекрывает тему Telegram и системы. */
+  :root[data-theme="light"] {
+    --bg: #ffffff; --bg2: #f1f1f4; --text: #1b1b1f; --hint: #8a8a93;
+    --accent: #2f7de1; --accent-text: #ffffff; --chord: #d9480f; color-scheme: light;
+  }
+  :root[data-theme="dark"] {
+    --bg: #17181c; --bg2: #24262c; --text: #ececf1; --hint: #8d8f98;
+    --accent: #4c8ff0; --accent-text: #ffffff; --chord: #ffa94d; color-scheme: dark;
+  }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; background: var(--bg); color: var(--text);
     font: 15px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -30,8 +39,14 @@
 
   /* ---------- Список песен ---------- */
   #list { padding: 12px 16px 24px; }
+  .top { display: flex; align-items: center; gap: 8px; }
+  .top > :first-child { flex: 1; min-width: 0; }
+  .theme-btn { flex: 0 0 auto; width: 38px; height: 38px; border: 0; border-radius: 10px;
+    background: var(--bg2); cursor: pointer; font-size: 18px; line-height: 1; }
+  .theme-btn:active { opacity: .6; }
+  #list .top { margin-bottom: 8px; }
   #search { width: 100%; padding: 10px 12px; border: 0; border-radius: 10px;
-    background: var(--bg2); outline: none; margin-bottom: 8px; }
+    background: var(--bg2); outline: none; }
   #list ul { list-style: none; margin: 0; padding: 0; }
   #list li { padding: 12px 4px; border-bottom: 1px solid var(--sep); cursor: pointer; }
   #list li:active { opacity: .6; }
@@ -71,14 +86,20 @@
 <body>
 
 <section id="list">
-  <input id="search" type="search" placeholder="Найти песню" autocomplete="off">
+  <div class="top">
+    <input id="search" type="search" placeholder="Найти песню" autocomplete="off">
+    <button class="theme-btn" type="button"></button>
+  </div>
   <ul id="titles"></ul>
   <div id="empty" hidden>Ничего не найдено</div>
 </section>
 
 <section id="song">
   <header>
-    <h1 id="title"></h1>
+    <div class="top">
+      <h1 id="title"></h1>
+      <button class="theme-btn" type="button"></button>
+    </div>
     <div id="keyline"></div>
   </header>
   <pre id="sheet"></pre>
@@ -128,6 +149,49 @@
     tg.expand();
     if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); // чтобы прокрутка не закрывала приложение
   }
+
+  // ---------- Тема: авто (как в Telegram/системе) → светлая → тёмная ----------
+  const THEMES = {
+    auto:  { icon: "◐", label: "Тема: как в Telegram" },
+    light: { icon: "☀️", label: "Тема: светлая" },
+    dark:  { icon: "🌙", label: "Тема: тёмная" },
+  };
+  const ORDER = ["auto", "light", "dark"];
+  let theme = store.get("theme", "auto");
+  if (!THEMES[theme]) theme = "auto";
+
+  function applyTheme() {
+    const root = document.documentElement;
+    if (theme === "auto") delete root.dataset.theme; else root.dataset.theme = theme;
+    for (const b of document.querySelectorAll(".theme-btn")) {
+      b.textContent = THEMES[theme].icon;
+      b.title = THEMES[theme].label;
+      b.setAttribute("aria-label", THEMES[theme].label + " (нажмите, чтобы сменить)");
+    }
+    // Шапка и фон самого Telegram вокруг страницы — в цвет выбранной темы.
+    if (tg && tg.setHeaderColor) {
+      try {
+        if (theme === "auto") {
+          tg.setHeaderColor("bg_color");
+          tg.setBackgroundColor("bg_color");
+        } else {
+          const cs = getComputedStyle(root);
+          tg.setHeaderColor(cs.getPropertyValue("--bg").trim());
+          tg.setBackgroundColor(cs.getPropertyValue("--bg").trim());
+          if (tg.setBottomBarColor) tg.setBottomBarColor(cs.getPropertyValue("--bg2").trim());
+        }
+      } catch {}
+    }
+  }
+  for (const b of document.querySelectorAll(".theme-btn")) {
+    b.addEventListener("click", () => {
+      theme = ORDER[(ORDER.indexOf(theme) + 1) % ORDER.length];
+      store.set("theme", theme);
+      try { tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged(); } catch {}
+      applyTheme();
+    });
+  }
+  applyTheme();
 
   // ---------- Список песен ----------
   let allTitles = [];
