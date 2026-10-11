@@ -30,5 +30,8 @@ COPY --from=builder /app/songbot .
 COPY --from=builder /app/songs ./songs
 COPY --from=builder /app/chords ./chords
 
+# Порт мини-приложения с аккордами (Railway и другие хостинги передают его в переменной PORT)
+EXPOSE 8080
+
 # Запускаем бота
 CMD ["./songbot"]

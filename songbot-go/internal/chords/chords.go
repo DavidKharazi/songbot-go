@@ -105,7 +105,8 @@ func (s speller) name(v int) string {
 }
 
 // Тональности, в которых принято писать бемоли.
-var flatMajor = map[int]bool{5: true, 10: true, 3: true, 8: true, 1: true, 6: true} // F Bb Eb Ab Db Gb
+// Fis/Ges (6 знаков в обе стороны) пишем через диезы — F# привычнее гитаристам.
+var flatMajor = map[int]bool{5: true, 10: true, 3: true, 8: true, 1: true}          // F Bb Eb Ab Db
 var flatMinor = map[int]bool{2: true, 7: true, 0: true, 5: true, 10: true, 3: true} // Dm Gm Cm Fm Bbm Ebm
 
 func spellerFor(n notation, key Key) speller {
@@ -289,6 +290,17 @@ func chordTokenIndexes(toks []token) []int {
 		i = j
 	}
 	return idx
+}
+
+// ChordSpans возвращает диапазоны [начало, конец) в рунах, где в строке стоят аккорды —
+// для подсветки аккордов (в том числе в строках вида "Вступление: C Dm | Am G").
+func ChordSpans(line string) [][2]int {
+	toks := tokenize([]rune(line))
+	var spans [][2]int
+	for _, i := range chordTokenIndexes(toks) {
+		spans = append(spans, [2]int{toks[i].start, toks[i].start + len([]rune(toks[i].text))})
+	}
+	return spans
 }
 
 // IsChordLine сообщает, состоит ли строка только из аккордов (и разделителей).
