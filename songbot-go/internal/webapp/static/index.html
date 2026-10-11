@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Аккорды</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --bg2: var(--tg-theme-secondary-bg-color, #f1f1f4);
+    --text: var(--tg-theme-text-color, #1b1b1f);
+    --hint: var(--tg-theme-hint-color, #8a8a93);
+    --accent: var(--tg-theme-button-color, #2f7de1);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --chord: var(--tg-theme-link-color, #d9480f);
+    --sep: color-mix(in srgb, var(--hint) 30%, transparent);
+    --mono: ui-monospace, "SF Mono", Menlo, "Roboto Mono", "DejaVu Sans Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not(.tg) {
+      --bg: #17181c; --bg2: #24262c; --text: #ececf1; --hint: #8d8f98;
+      --accent: #4c8ff0; --chord: #ffa94d;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  button, select, input { font: inherit; color: inherit; }
+
+  /* ---------- Список песен ---------- */
+  #list { padding: 12px 16px 24px; }
+  #search { width: 100%; padding: 10px 12px; border: 0; border-radius: 10px;
+    background: var(--bg2); outline: none; margin-bottom: 8px; }
+  #list ul { list-style: none; margin: 0; padding: 0; }
+  #list li { padding: 12px 4px; border-bottom: 1px solid var(--sep); cursor: pointer; }
+  #list li:active { opacity: .6; }
+  #empty { color: var(--hint); padding: 16px 4px; }
+
+  /* ---------- Песня ---------- */
+  #song { display: none; }
+  header { padding: 10px 16px 6px; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  #keyline { color: var(--hint); font-size: 13px; margin-top: 2px; }
+  #keyline b { color: var(--text); }
+  #sheet { margin: 0; padding: 6px 16px 120px; font-family: var(--mono);
+    white-space: pre; overflow-x: auto; line-height: 1.25; }
+  #sheet .c { color: var(--chord); font-weight: 700; }
+  /* Служебный элемент для измерения ширины символа. Контейнер нулевого размера, чтобы он
+     не растягивал страницу (иначе телефон считает экран шире и панель уезжает за край). */
+  #measurebox { position: absolute; top: 0; left: 0; width: 0; height: 0; overflow: hidden; }
+  #measure { visibility: hidden; white-space: pre; font-family: var(--mono); }
+
+  /* ---------- Панель внизу ---------- */
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; background: var(--bg2);
+    border-top: 1px solid var(--sep);
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); display: grid; gap: 8px; }
+  .row { display: flex; gap: 6px; align-items: center; }
+  .row > * { flex: 1; }
+  .btn { border: 0; border-radius: 10px; padding: 9px 0; background: var(--bg);
+    cursor: pointer; white-space: nowrap; font-size: 14px; min-width: 0; }
+  #wrap, #scroll { flex: 1.5; }
+  .btn:active { opacity: .6; }
+  .btn.on { background: var(--accent); color: var(--accent-text); }
+  select.btn { text-align: center; text-align-last: center; appearance: none; -webkit-appearance: none;
+    font-weight: 600; flex: 1.4; }
+  #speed { flex: 0 0 auto; min-width: 34px; color: var(--hint); text-align: center; cursor: pointer; }
+  #error { color: var(--hint); padding: 24px 16px; display: none; }
+</style>
+</head>
+<body>
+
+<section id="list">
+  <input id="search" type="search" placeholder="Найти песню" autocomplete="off">
+  <ul id="titles"></ul>
+  <div id="empty" hidden>Ничего не найдено</div>
+</section>
+
+<section id="song">
+  <header>
+    <h1 id="title"></h1>
+    <div id="keyline"></div>
+  </header>
+  <pre id="sheet"></pre>
+  <div id="bar">
+    <div class="row">
+      <button class="btn" id="down" aria-label="на полтона ниже">−½</button>
+      <select class="btn" id="key" aria-label="тональность"></select>
+      <button class="btn" id="up" aria-label="на полтона выше">+½</button>
+      <button class="btn" id="reset" aria-label="исходная тональность">↺</button>
+    </div>
+    <div class="row">
+      <button class="btn" id="smaller" aria-label="шрифт меньше">A−</button>
+      <button class="btn" id="bigger" aria-label="шрифт больше">A+</button>
+      <button class="btn" id="wrap" aria-label="перенос строк">⤶ Перенос</button>
+      <button class="btn" id="scroll" aria-label="автопрокрутка">▶ Прокрутка</button>
+      <span id="speed"></span>
+    </div>
+  </div>
+</section>
+
+<div id="error"></div>
+<div id="measurebox"><span id="measure">MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM</span></div>
+
+<script>
+(() => {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const $ = (id) => document.getElementById(id);
+
+  // Настройки читателя (размер шрифта и т.п.) — только удобство, без них всё работает.
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem("chords." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+    set(k, v) { try { localStorage.setItem("chords." + k, JSON.stringify(v)); } catch {} },
+  };
+
+  const state = {
+    title: null,
+    shift: 0,
+    font: store.get("font", 16),
+    wrap: store.get("wrap", true),
+    speed: store.get("speed", 2),     // 1..5
+    scrolling: false,
+  };
+
+  if (tg && tg.initData !== undefined) {
+    document.documentElement.classList.add("tg");
+    tg.ready();
+    tg.expand();
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); // чтобы прокрутка не закрывала приложение
+  }
+
+  // ---------- Список песен ----------
+  let allTitles = [];
+  function renderList() {
+    const q = $("search").value.trim().toLowerCase();
+    const ul = $("titles");
+    ul.textContent = "";
+    const shown = allTitles.filter((t) => t.toLowerCase().includes(q));
+    for (const t of shown) {
+      const li = document.createElement("li");
+      li.textContent = t;
+      li.onclick = () => openSong(t, 0, true);
+      ul.appendChild(li);
+    }
+    $("empty").hidden = shown.length > 0;
+  }
+  async function showList() {
+    stopScroll();
+    state.title = null;
+    $("song").style.display = "none";
+    $("list").style.display = "block";
+    if (tg && tg.BackButton) tg.BackButton.hide();
+    if (!allTitles.length) {
+      const r = await fetch("api/songs");
+      allTitles = await r.json();
+    }
+    renderList();
+  }
+  $("search").addEventListener("input", renderList);
+
+  // ---------- Песня ----------
+  let fromList = false;
+  function openSong(title, shift, viaList) {
+    fromList = viaList;
+    state.title = title;
+    state.shift = shift;
+    $("list").style.display = "none";
+    $("song").style.display = "block";
+    window.scrollTo(0, 0);
+    if (tg && tg.BackButton) {
+      if (fromList) tg.BackButton.show(); else tg.BackButton.hide();
+    }
+    keepScreenOn();
+    load();
+  }
+
+  // Сколько моноширинных символов помещается в строку при текущем шрифте.
+  function columns() {
+    const m = $("measure");
+    m.style.fontSize = state.font + "px";
+    const charW = m.getBoundingClientRect().width / m.textContent.length;
+    const sheet = $("sheet");
+    const cs = getComputedStyle(sheet);
+    const inner = sheet.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    return Math.max(16, Math.floor(inner / charW));
+  }
+
+  let reqId = 0;
+  async function load() {
+    const id = ++reqId;
+    const params = new URLSearchParams({ title: state.title, shift: state.shift, width: state.wrap ? columns() : 0 });
+    let data;
+    try {
+      const r = await fetch("api/song?" + params);
+      if (!r.ok) throw new Error(await r.text());
+      data = await r.json();
+    } catch (e) {
+      return showError("Не удалось загрузить песню. " + (e.message || ""));
+    }
+    if (id !== reqId) return; // пришёл ответ на устаревший запрос
+    render(data);
+  }
+
+  function render(d) {
+    $("title").textContent = d.title;
+    document.title = d.title;
+
+    const kl = $("keyline");
+    kl.textContent = "";
+    if (d.hasKey) {
+      const b = document.createElement("b");
+      b.textContent = d.key;
+      kl.append("Тональность ", b, d.shift === 0 ? " · исходная" : ` · исходная ${d.origKey}, ${d.display > 0 ? "+" : ""}${d.display}`);
+    } else if (d.shift !== 0) {
+      kl.append(`Сдвиг ${d.display > 0 ? "+" : ""}${d.display}`);
+    }
+    if (d.capo) kl.append(` · или каподастр на ${d.capo} лад и аккорды из ${d.hasKey ? d.origKey : "исходной"}`);
+
+    const sel = $("key");
+    sel.textContent = "";
+    if (d.hasKey) {
+      for (const k of d.keys) {
+        const o = document.createElement("option");
+        o.value = k.shift;
+        o.textContent = k.name;
+        o.selected = k.shift === d.shift;
+        sel.appendChild(o);
+      }
+      sel.disabled = false;
+    } else {
+      const o = document.createElement("option");
+      o.textContent = d.display === 0 ? "0" : (d.display > 0 ? "+" : "") + d.display;
+      sel.appendChild(o);
+      sel.disabled = true;
+    }
+
+    // Текст: аккорды подсвечиваются по диапазонам, которые прислал сервер.
+    const sheet = $("sheet");
+    sheet.style.fontSize = state.font + "px";
+    const frag = document.createDocumentFragment();
+    d.lines.forEach((ln, i) => {
+      const chars = Array.from(ln.t);
+      let pos = 0;
+      for (const [a, b] of ln.c || []) {
+        if (a > pos) frag.append(chars.slice(pos, a).join(""));
+        const s = document.createElement("span");
+        s.className = "c";
+        s.textContent = chars.slice(a, b).join("");
+        frag.append(s);
+        pos = b;
+      }
+      if (pos < chars.length) frag.append(chars.slice(pos).join(""));
+      if (i < d.lines.length - 1) frag.append("\n");
+    });
+    sheet.textContent = "";
+    sheet.appendChild(frag);
+
+    $("wrap").classList.toggle("on", state.wrap);
+    $("speed").textContent = "×" + state.speed;
+    $("error").style.display = "none";
+  }
+
+  function showError(msg) {
+    $("error").textContent = msg;
+    $("error").style.display = "block";
+  }
+
+  function haptic() { try { tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged(); } catch {} }
+  function setShift(s) { state.shift = ((s % 12) + 12) % 12; haptic(); load(); }
+
+  $("down").onclick = () => setShift(state.shift - 1);
+  $("up").onclick = () => setShift(state.shift + 1);
+  $("reset").onclick = () => setShift(0);
+  $("key").onchange = (e) => setShift(parseInt(e.target.value, 10));
+  $("smaller").onclick = () => { state.font = Math.max(10, state.font - 1); store.set("font", state.font); load(); };
+  $("bigger").onclick = () => { state.font = Math.min(32, state.font + 1); store.set("font", state.font); load(); };
+  $("wrap").onclick = () => { state.wrap = !state.wrap; store.set("wrap", state.wrap); load(); };
+
+  // При повороте экрана перестраиваем перенос строк под новую ширину.
+  let resizeTimer;
+  window.addEventListener("resize", () => {
+    if (!state.title || !state.wrap) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(load, 150);
+  });
+
+  // ---------- Автопрокрутка ----------
+  let rafId = 0, last = 0, carry = 0;
+  function step(t) {
+    if (!state.scrolling) return;
+    if (last) {
+      carry += (t - last) / 1000 * state.speed * 12; // пикселей в секунду
+      const px = Math.floor(carry);
+      if (px > 0) { window.scrollBy(0, px); carry -= px; }
+      if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 2) return stopScroll();
+    }
+    last = t;
+    rafId = requestAnimationFrame(step);
+  }
+  function startScroll() { state.scrolling = true; last = 0; carry = 0; $("scroll").classList.add("on"); $("scroll").textContent = "⏸ Пауза"; rafId = requestAnimationFrame(step); }
+  function stopScroll() { state.scrolling = false; cancelAnimationFrame(rafId); $("scroll").classList.remove("on"); $("scroll").textContent = "▶ Прокрутка"; }
+  $("scroll").onclick = () => (state.scrolling ? stopScroll() : startScroll());
+  // Нажатие на число меняет скорость по кругу 1..5.
+  $("speed").onclick = () => { state.speed = state.speed % 5 + 1; store.set("speed", state.speed); $("speed").textContent = "×" + state.speed; haptic(); };
+
+  // ---------- Экран не гаснет, пока открыты аккорды ----------
+  let wakeLock = null;
+  async function keepScreenOn() {
+    try { if ("wakeLock" in navigator && !wakeLock) wakeLock = await navigator.wakeLock.request("screen"); wakeLock.onrelease = () => { wakeLock = null; }; } catch {}
+  }
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && state.title) keepScreenOn(); });
+
+  if (tg && tg.BackButton) tg.BackButton.onClick(showList);
+
+  // ---------- Старт ----------
+  const p = new URLSearchParams(location.search);
+  const title = p.get("title");
+  if (title) openSong(title, parseInt(p.get("shift") || "0", 10) || 0, false);
+  else showList().catch(() => showError("Не удалось загрузить список песен."));
+})();
+</script>
+</body>
+</html>

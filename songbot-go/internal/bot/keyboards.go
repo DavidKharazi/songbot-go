@@ -81,9 +81,13 @@ func allSongsPageKeyboard(allTitles []string, indexOf map[string]int, start int)
 // afterSongKeyboard — клавиатура после отправки песни. Файл с аккордами отправляется
 // сразу вместе с текстом песни, а если аккорды есть и в текстовом виде — добавляется
 // кнопка, которая присылает их текстом с возможностью транспонировать.
-func (b *Bot) afterSongKeyboard(songIndex int) tg.InlineKeyboardMarkup {
+func (b *Bot) afterSongKeyboard(chatID int64, songIndex int) tg.InlineKeyboardMarkup {
 	var rows [][]tg.InlineKeyboardButton
-	if _, ok := b.chordSongs[b.titleByIndex(songIndex)]; ok {
+	title := b.titleByIndex(songIndex)
+	if _, ok := b.chordSongs[title]; ok {
+		if btn, ok := b.webAppButton(chatID, title, 0); ok {
+			rows = append(rows, []tg.InlineKeyboardButton{btn})
+		}
 		rows = append(rows, []tg.InlineKeyboardButton{
 			{Text: "🎸 Аккорды текстом / транспонировать", CallbackData: fmt.Sprintf("chords|%d", songIndex)},
 		})

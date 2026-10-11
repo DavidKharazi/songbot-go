@@ -14,6 +14,7 @@ import (
 	"songbot/internal/gemini"
 	"songbot/internal/pdftext"
 	"songbot/internal/songs"
+	"songbot/internal/webapp"
 )
 
 func main() {
@@ -47,7 +48,24 @@ func main() {
 	log.Printf("загружено песен: %d, файлов аккордов: %d, из них текстом: %d",
 		len(store.Titles), len(store.Chords), len(store.ChordTexts))
 
-	b := bot.New(token, store, geminiClient)
+	// Мини-приложение с аккордами на весь экран. Нужен публичный https-адрес (WEBAPP_URL),
+	// который ведёт на порт PORT этого процесса (на Railway — «Generate domain»).
+	webAppURL := os.Getenv("WEBAPP_URL")
+	if webAppURL != "" && !strings.HasPrefix(webAppURL, "https://") {
+		log.Printf("WEBAPP_URL должен начинаться с https:// — Telegram не откроет мини-приложение по %q", webAppURL)
+	}
+	b := bot.New(token, store, geminiClient, webAppURL)
+
+	if port := os.Getenv("PORT"); port != "" || webAppURL != "" {
+		if port == "" {
+			port = "8080"
+		}
+		go func() {
+			if err := webapp.New(b.ChordSongs()).ListenAndServe(ctx, ":"+port); err != nil {
+				log.Printf("мини-приложение остановлено с ошибкой: %v", err)
+			}
+		}()
+	}
 
 	if err := b.Run(ctx); err != nil {
 		log.Fatalf("бот остановлен с ошибкой: %v", err)

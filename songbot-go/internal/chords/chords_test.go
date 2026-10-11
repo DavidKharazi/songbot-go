@@ -101,3 +101,10 @@ func TestWrapSplitsTitleFromChords(t *testing.T) {
 		t.Fatalf("получено %q, ожидалось %q", got, want)
 	}
 }
+
+func TestFSharpMajorUsesSharps(t *testing.T) {
+	s := Parse("E   A   H\nслова", "")
+	if got := s.KeyName(2); got != "F#" {
+		t.Fatalf("E +2 = %q, ожидалось F#", got)
+	}
+}

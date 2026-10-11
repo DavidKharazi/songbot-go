@@ -120,8 +120,16 @@ type Update struct {
 
 // InlineKeyboardButton — кнопка инлайн-клавиатуры.
 type InlineKeyboardButton struct {
-	Text         string `json:"text"`
-	CallbackData string `json:"callback_data"`
+	Text         string      `json:"text"`
+	CallbackData string      `json:"callback_data,omitempty"`
+	URL          string      `json:"url,omitempty"`
+	WebApp       *WebAppInfo `json:"web_app,omitempty"`
+}
+
+// WebAppInfo — ссылка на мини-приложение (Telegram Mini App), которое откроется внутри Telegram.
+// Кнопки web_app работают только в личных чатах с ботом.
+type WebAppInfo struct {
+	URL string `json:"url"`
 }
 
 // InlineKeyboardMarkup — инлайн-клавиатура (под сообщением).

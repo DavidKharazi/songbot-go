@@ -26,6 +26,7 @@ type Bot struct {
 	catalog string // все песни одной строкой для запроса к Gemini (собирается один раз)
 
 	chordSongs map[string]*chords.Song // название -> разобранный текст с аккордами (для транспонирования)
+	webAppURL  string                  // адрес мини-приложения с аккордами; пусто — кнопка не показывается
 
 	mu    sync.Mutex
 	pages map[int64]int // chatID -> текущая позиция постраничного списка "Все песни"
@@ -40,7 +41,8 @@ type Bot struct {
 const maxConcurrentUpdates = 32
 
 // New создаёт бота поверх уже загруженного хранилища песен.
-func New(token string, store *songs.Store, geminiClient *gemini.Client) *Bot {
+// webAppURL — https-адрес мини-приложения с аккордами (пустая строка, если его нет).
+func New(token string, store *songs.Store, geminiClient *gemini.Client, webAppURL string) *Bot {
 	indexOf := make(map[string]int, len(store.Titles))
 	for i, t := range store.Titles {
 		indexOf[t] = i
@@ -52,6 +54,7 @@ func New(token string, store *songs.Store, geminiClient *gemini.Client) *Bot {
 		indexOf:    indexOf,
 		catalog:    buildCatalog(store),
 		chordSongs: parseChordSongs(store.ChordTexts, store.Chords),
+		webAppURL:  strings.TrimRight(webAppURL, "/"),
 		pages:      map[int64]int{},
 		sem:        make(chan struct{}, maxConcurrentUpdates),
 	}
@@ -68,6 +71,11 @@ func buildCatalog(store *songs.Store) string {
 		sb.WriteString("\n---\n")
 	}
 	return sb.String()
+}
+
+// ChordSongs возвращает разобранные песни с аккордами (для мини-приложения).
+func (b *Bot) ChordSongs() map[string]*chords.Song {
+	return b.chordSongs
 }
 
 // Run запускает цикл long polling. Каждое обновление обрабатывается в отдельной горутине,
@@ -298,7 +306,7 @@ func (b *Bot) sendSong(chatID int64, title string) {
 	}
 
 	idx := b.indexOf[title]
-	if _, err := b.tg.SendMessage(chatID, "Еще ⤵:", b.afterSongKeyboard(idx)); err != nil {
+	if _, err := b.tg.SendMessage(chatID, "Еще ⤵:", b.afterSongKeyboard(chatID, idx)); err != nil {
 		log.Printf("sendSong nav: %v", err)
 	}
 }
@@ -337,7 +345,7 @@ func (b *Bot) sendBibleVerse(chatID int64, title string) {
 			log.Printf("sendBibleVerse fail notify: %v", e)
 		}
 		idx := b.indexOf[title]
-		if _, e := b.tg.SendMessage(chatID, "Еще ⤵:", b.afterSongKeyboard(idx)); e != nil {
+		if _, e := b.tg.SendMessage(chatID, "Еще ⤵:", b.afterSongKeyboard(chatID, idx)); e != nil {
 			log.Printf("sendBibleVerse nav: %v", e)
 		}
 		return
@@ -351,7 +359,7 @@ func (b *Bot) sendBibleVerse(chatID int64, title string) {
 	}
 
 	idx := b.indexOf[title]
-	if _, err := b.tg.SendMessage(chatID, "Еще ⤵:", b.afterSongKeyboard(idx)); err != nil {
+	if _, err := b.tg.SendMessage(chatID, "Еще ⤵:", b.afterSongKeyboard(chatID, idx)); err != nil {
 		log.Printf("sendBibleVerse nav: %v", err)
 	}
 }

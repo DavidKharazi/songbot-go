@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html"
 	"log"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -67,15 +68,20 @@ func renderChords(title string, song *chords.Song, shift int) string {
 
 // transposeKeyboard — кнопки сдвига на полтона и выбора тональности.
 // callback_data: "tr|<индекс песни>|<сдвиг 0..11>".
-func transposeKeyboard(songIndex int, song *chords.Song, shift int) tg.InlineKeyboardMarkup {
+// Если задана кнопка мини-приложения (open), она идёт первой строкой.
+func transposeKeyboard(songIndex int, song *chords.Song, shift int, open *tg.InlineKeyboardButton) tg.InlineKeyboardMarkup {
 	shift = ((shift % 12) + 12) % 12
 	cb := func(s int) string { return fmt.Sprintf("tr|%d|%d", songIndex, ((s%12)+12)%12) }
 
-	rows := [][]tg.InlineKeyboardButton{{
+	var rows [][]tg.InlineKeyboardButton
+	if open != nil {
+		rows = append(rows, []tg.InlineKeyboardButton{*open})
+	}
+	rows = append(rows, []tg.InlineKeyboardButton{
 		{Text: "➖ ½ тона", CallbackData: cb(shift - 1)},
 		{Text: "↺ Исходная", CallbackData: cb(0)},
 		{Text: "➕ ½ тона", CallbackData: cb(shift + 1)},
-	}}
+	})
 
 	if song.HasKey {
 		// 12 тональностей по порядку нот от до, по 6 в ряд.
@@ -114,7 +120,7 @@ func (b *Bot) sendChords(chatID int64, idx int) {
 		}
 		return
 	}
-	kb := transposeKeyboard(idx, song, 0)
+	kb := transposeKeyboard(idx, song, 0, b.webAppButtonPtr(chatID, title, 0))
 	if _, err := b.tg.SendMessageHTML(chatID, renderChords(title, song, 0), kb); err != nil {
 		log.Printf("sendChords: %v", err)
 	}
@@ -127,10 +133,37 @@ func (b *Bot) editChords(chatID int64, msgID, idx, shift int) {
 	if !ok {
 		return
 	}
-	kb := transposeKeyboard(idx, song, shift)
+	kb := transposeKeyboard(idx, song, shift, b.webAppButtonPtr(chatID, title, shift))
 	err := b.tg.EditMessageTextHTML(chatID, msgID, renderChords(title, song, shift), &kb)
 	// Повторное нажатие на текущую тональность — не ошибка.
 	if err != nil && !strings.Contains(err.Error(), "message is not modified") {
 		log.Printf("editChords: %v", err)
 	}
+}
+
+// webAppButton — кнопка «Открыть на весь экран». В личном чате это кнопка мини-приложения
+// (web_app), а в группах Telegram такие кнопки не разрешает — там это обычная ссылка,
+// которая откроет ту же страницу в браузере. ok=false, если мини-приложение не настроено.
+func (b *Bot) webAppButton(chatID int64, title string, shift int) (tg.InlineKeyboardButton, bool) {
+	if b.webAppURL == "" {
+		return tg.InlineKeyboardButton{}, false
+	}
+	link := b.webAppURL + "/?" + url.Values{
+		"title": {title},
+		"shift": {fmt.Sprint(((shift % 12) + 12) % 12)},
+	}.Encode()
+	btn := tg.InlineKeyboardButton{Text: "📱 Открыть на весь экран"}
+	if chatID > 0 { // у личных чатов id положительный, у групп — отрицательный
+		btn.WebApp = &tg.WebAppInfo{URL: link}
+	} else {
+		btn.URL = link
+	}
+	return btn, true
+}
+
+func (b *Bot) webAppButtonPtr(chatID int64, title string, shift int) *tg.InlineKeyboardButton {
+	if btn, ok := b.webAppButton(chatID, title, shift); ok {
+		return &btn
+	}
+	return nil
 }
