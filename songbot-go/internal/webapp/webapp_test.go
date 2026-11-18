@@ -82,3 +82,28 @@ func TestSongWithLocalMoves(t *testing.T) {
 		t.Fatalf("правки к другой версии текста не должны применяться: %v", got)
 	}
 }
+
+func TestSongEditsViaPost(t *testing.T) {
+	s := testServer()
+	var plain songResponse
+	json.Unmarshal(get(t, s, "/api/song?"+url.Values{"title": {"Песня"}}.Encode()).Body.Bytes(), &plain)
+
+	body := `{"title":"Песня","shift":2,"rev":"` + plain.Rev + `","edits":{
+		"0.0":{"text":"F#7","at":2},
+		"0.1":{"del":true},
+		"-1.1":{"line":0,"d":4,"text":"D","at":2},
+		"-1.2":{"line":0,"d":2,"text":"абв"}}}`
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/song", strings.NewReader(body)))
+	var resp songResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	// Em заменён на F#7 (введён при +2, показывается при +2), Am удалён, добавлен D.
+	if resp.Lines[0].Text != "F#7 D" {
+		t.Fatalf("строка аккордов: %q", resp.Lines[0].Text)
+	}
+	if len(resp.Bad) != 1 || resp.Bad[0] != "-1.2" {
+		t.Fatalf("ошибочные правки: %v", resp.Bad)
+	}
+}

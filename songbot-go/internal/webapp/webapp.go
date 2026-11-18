@@ -11,6 +11,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"sort"
@@ -112,30 +113,102 @@ type songResponse struct {
 	Keys    []keyOption `json:"keys,omitempty"`
 	Rev     string      `json:"rev"` // отпечаток текста песни: правки привязаны к нему
 	Lines   []line      `json:"lines"`
+	Bad     []string    `json:"bad,omitempty"` // правки, которые не удалось применить ("строка.номер")
+}
+
+// songRequest — запрос песни. Приходит либо параметрами GET, либо JSON в теле POST
+// (так удобнее передавать правки аккордов, которые хранятся в телефоне).
+type songRequest struct {
+	Title string               `json:"title"`
+	Shift int                  `json:"shift"`
+	Width int                  `json:"width"`
+	Rev   string               `json:"rev"`
+	Edits map[string]editInput `json:"edits"` // ключ — "строка.номер" (у новых аккордов строка -1)
+}
+
+type editInput struct {
+	D    int    `json:"d"`    // сдвиг; у нового аккорда — столбец
+	Line *int   `json:"line"` // строка аккордов, куда перенесён/поставлен
+	Text string `json:"text"` // новый текст аккорда
+	At   int    `json:"at"`   // тональность (сдвиг), в которой введён текст
+	Del  bool   `json:"del"`
+}
+
+const maxEdits = 2000
+
+func (in songRequest) edits() map[chords.ChordID]chords.Edit {
+	out := map[chords.ChordID]chords.Edit{}
+	for key, e := range in.Edits {
+		if len(out) >= maxEdits {
+			break
+		}
+		id, ok := parseID(key)
+		if !ok || e.D < -500 || e.D > 500 || len(e.Text) > 40 {
+			continue
+		}
+		line := -1
+		if e.Line != nil {
+			line = *e.Line
+		}
+		out[id] = chords.Edit{Delta: e.D, Line: line, Text: e.Text, At: e.At, Delete: e.Del}
+	}
+	return out
+}
+
+func parseID(key string) (chords.ChordID, bool) {
+	f := strings.Split(key, ".")
+	if len(f) != 2 {
+		return chords.ChordID{}, false
+	}
+	l, err1 := strconv.Atoi(f[0])
+	k, err2 := strconv.Atoi(f[1])
+	if err1 != nil || err2 != nil || l < chords.NewChordLine || k < 0 {
+		return chords.ChordID{}, false
+	}
+	return chords.ChordID{Line: l, Token: k}, true
 }
 
 // handleSong: /api/song?title=...&shift=0..11&width=N
 // width — сколько символов помещается в строку на экране; 0 — без переноса.
 func (s *Server) handleSong(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	title := q.Get("title")
+	var in songRequest
+	edits := map[chords.ChordID]chords.Edit{}
+	if r.Method == http.MethodPost {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&in); err != nil {
+			http.Error(w, "неверный запрос", http.StatusBadRequest)
+			return
+		}
+		edits = in.edits()
+	} else {
+		q := r.URL.Query()
+		in.Title, in.Rev = q.Get("title"), q.Get("rev")
+		in.Shift, _ = strconv.Atoi(q.Get("shift"))
+		in.Width, _ = strconv.Atoi(q.Get("width"))
+		for id, m := range parseMoves(q.Get("moves")) {
+			edits[id] = chords.Edit{Delta: m.Delta, Line: m.Line}
+		}
+	}
+	title := in.Title
 	song, ok := s.songs[title]
 	if !ok {
 		http.Error(w, "песня не найдена", http.StatusNotFound)
 		return
 	}
-	shift, _ := strconv.Atoi(q.Get("shift"))
-	shift = ((shift % 12) + 12) % 12
-	width, _ := strconv.Atoi(q.Get("width"))
+	shift := ((in.Shift % 12) + 12) % 12
+	width := in.Width
 
 	rev := song.Rev()
-	// Правки положения аккордов хранятся только в телефоне и приходят с запросом,
-	// если они сделаны для этой же версии текста песни.
-	if q.Get("rev") == rev {
-		song = song.WithMoves(parseMoves(q.Get("moves")))
+	// Правки аккордов хранятся только в телефоне и приходят с запросом;
+	// применяем их, только если они сделаны для этой же версии текста песни.
+	var bad []chords.ChordID
+	if in.Rev == rev && len(edits) > 0 {
+		song, bad = song.WithEdits(edits)
 	}
 
 	resp := songResponse{Title: title, Shift: shift, Display: shift, HasKey: song.HasKey, Rev: rev}
+	for _, id := range bad {
+		resp.Bad = append(resp.Bad, fmt.Sprintf("%d.%d", id.Line, id.Token))
+	}
 	if resp.Display > 6 {
 		resp.Display -= 12
 	}
