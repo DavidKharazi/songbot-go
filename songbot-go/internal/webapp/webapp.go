@@ -92,8 +92,13 @@ type keyOption struct {
 type line struct {
 	Text string `json:"t"`
 	// Где в строке аккорды: [начало, конец] или, если аккорд можно двигать,
-	// [начало, конец, строка, номер] — постоянный адрес аккорда в исходном тексте.
+	// [начало, конец, строка, номер, исходный столбец] — постоянный адрес аккорда
+	// в исходном тексте и его столбец там до правок.
 	Chords [][]int `json:"c,omitempty"`
+	// Откуда строка взята в тексте песни: символ в столбце x — это столбец o+x строки s.
+	Src    int  `json:"s"`
+	Offset int  `json:"o"`
+	Drop   bool `json:"d,omitempty"` // строка аккордов: сюда можно перетащить аккорд
 }
 
 type songResponse struct {
@@ -149,10 +154,10 @@ func (s *Server) handleSong(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	for _, rl := range song.Render(shift, width) {
-		l := line{Text: rl.Text}
+		l := line{Text: rl.Text, Src: rl.Src, Offset: rl.Offset, Drop: rl.ChordLine}
 		for _, sp := range rl.Spans {
 			if sp.ID != nil {
-				l.Chords = append(l.Chords, []int{sp.Start, sp.End, sp.ID.Line, sp.ID.Token})
+				l.Chords = append(l.Chords, []int{sp.Start, sp.End, sp.ID.Line, sp.ID.Token, sp.OrigCol})
 			} else {
 				l.Chords = append(l.Chords, []int{sp.Start, sp.End})
 			}
@@ -162,10 +167,10 @@ func (s *Server) handleSong(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// parseMoves разбирает правки вида "строка.номер.сдвиг,строка.номер.сдвиг".
+// parseMoves разбирает правки вида "строка.номер.сдвиг[.новая_строка],...".
 // Некорректные части пропускаются; размер и величина сдвигов ограничены.
-func parseMoves(raw string) map[chords.ChordID]int {
-	moves := map[chords.ChordID]int{}
+func parseMoves(raw string) map[chords.ChordID]chords.Move {
+	moves := map[chords.ChordID]chords.Move{}
 	if raw == "" {
 		return moves
 	}
@@ -174,16 +179,24 @@ func parseMoves(raw string) map[chords.ChordID]int {
 			break
 		}
 		f := strings.Split(item, ".")
-		if len(f) != 3 {
+		if len(f) != 3 && len(f) != 4 {
 			continue
 		}
-		l, err1 := strconv.Atoi(f[0])
-		k, err2 := strconv.Atoi(f[1])
-		d, err3 := strconv.Atoi(f[2])
-		if err1 != nil || err2 != nil || err3 != nil || l < 0 || k < 0 || d < -500 || d > 500 {
+		var n [4]int
+		n[3] = -1
+		ok := true
+		for j, part := range f {
+			v, err := strconv.Atoi(part)
+			if err != nil {
+				ok = false
+				break
+			}
+			n[j] = v
+		}
+		if !ok || n[0] < 0 || n[1] < 0 || n[2] < -500 || n[2] > 500 {
 			continue
 		}
-		moves[chords.ChordID{Line: l, Token: k}] = d
+		moves[chords.ChordID{Line: n[0], Token: n[1]}] = chords.Move{Delta: n[2], Line: n[3]}
 	}
 	return moves
 }

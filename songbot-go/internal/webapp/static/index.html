@@ -59,11 +59,17 @@
   #keyline { color: var(--hint); font-size: 13px; margin-top: 2px; }
   #keyline b { color: var(--text); }
   #sheet { margin: 0; padding: 6px 16px 120px; font-family: var(--mono);
-    white-space: pre; overflow-x: auto; line-height: 1.25; }
+    white-space: pre; overflow-x: auto; line-height: 1.25; position: relative; }
   #sheet .c { color: var(--chord); font-weight: 700; }
   /* Режим правки: аккорды, которые можно двигать, обведены; выбранный — залит. */
   #sheet.editing .c.m { outline: 1px dashed currentColor; outline-offset: 1px; border-radius: 3px; cursor: pointer; }
   #sheet.editing .c.sel { background: var(--chord); color: var(--bg); outline: none; }
+  /* Перетаскивание пальцем: аккорд не прокручивает страницу, пока его тянут. */
+  #sheet.editing { user-select: none; -webkit-user-select: none; }
+  #sheet.editing .c.m { display: inline-block; touch-action: none; }
+  #sheet .c.dragging { opacity: .3; }
+  #ghost { position: absolute; pointer-events: none; font-weight: 700; color: var(--bg);
+    background: var(--chord); border-radius: 3px; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
   #editbar { display: none; }
   #bar.editing .normal { display: none; }
   #bar.editing #editbar { display: grid; gap: 6px; }
@@ -127,7 +133,7 @@
       <span id="speed"></span>
     </div>
     <div id="editbar">
-      <div class="hint" id="edithint">Нажмите на аккорд, затем двигайте его стрелками</div>
+      <div class="hint" id="edithint">Перетащите аккорд пальцем или нажмите на него и двигайте стрелками</div>
       <div class="row">
         <button class="btn" id="left" aria-label="аккорд левее">←</button>
         <button class="btn" id="right" aria-label="аккорд правее">→</button>
@@ -288,7 +294,8 @@
     const id = ++reqId;
     const params = new URLSearchParams({ title: state.title, shift: state.shift, width: state.wrap ? columns() : 0 });
     const mv = loadMoves(state.title);
-    const list = Object.entries(mv.m).map(([id, d]) => id + "." + d);
+    // Правка — сдвиг в символах или [сдвиг, строка аккордов, куда перенесён].
+    const list = Object.entries(mv.m).map(([id, v]) => Array.isArray(v) ? `${id}.${v[0]}.${v[1]}` : `${id}.${v}`);
     if (list.length) { params.set("rev", mv.rev); params.set("moves", list.join(",")); }
     let data;
     try {
@@ -303,6 +310,7 @@
   }
 
   function render(d) {
+    state.lines = d.lines;
     $("title").textContent = d.title;
     document.title = d.title;
 
@@ -352,13 +360,14 @@
     d.lines.forEach((ln, i) => {
       const chars = Array.from(ln.t);
       let pos = 0;
-      for (const [a, b, l, k] of ln.c || []) {
+      for (const [a, b, l, k, oc] of ln.c || []) {
         if (a > pos) frag.append(chars.slice(pos, a).join(""));
         const s = document.createElement("span");
         s.className = "c";
         if (l !== undefined) {
           s.classList.add("m");
           s.dataset.id = l + "." + k;
+          s.dataset.oc = oc;
           if (s.dataset.id === state.sel) s.classList.add("sel");
         }
         s.textContent = chars.slice(a, b).join("");
@@ -374,8 +383,8 @@
     $("bar").classList.toggle("editing", state.editing);
     $("edit").classList.toggle("on", state.editing);
     $("edithint").textContent = state.sel
-      ? "Двигайте стрелками; можно удерживать"
-      : "Нажмите на аккорд, затем двигайте его стрелками";
+      ? "Перетащите пальцем или двигайте стрелками"
+      : "Перетащите аккорд пальцем или нажмите на него и двигайте стрелками";
 
     $("wrap").classList.toggle("on", state.wrap);
     $("speed").textContent = "×" + state.speed;
@@ -408,29 +417,154 @@
   $("edit").onclick = () => setEditing(!state.editing);
   $("done").onclick = () => setEditing(false);
 
-  $("sheet").addEventListener("click", (e) => {
+  function select(span) {
+    state.sel = span.dataset.id;
+    for (const el of document.querySelectorAll("#sheet .c.sel")) el.classList.remove("sel");
+    span.classList.add("sel");
+    $("edithint").textContent = "Перетащите пальцем или двигайте стрелками";
+  }
+
+  // Сохранить правку аккорда: сдвиг d относительно исходного столбца и строка line
+  // (-1 — своя строка). Нулевой сдвиг в своей строке — правки нет.
+  function setMove(id, d, line) {
+    const mv = loadMoves(state.title);
+    mv.rev = state.rev;
+    if (line >= 0 && line !== parseInt(id, 10)) mv.m[id] = [d, line];
+    else if (d) mv.m[id] = d;
+    else delete mv.m[id];
+    saveMoves(state.title, mv);
+    load();
+  }
+  function getMove(id) {
+    const v = loadMoves(state.title).m[id];
+    return Array.isArray(v) ? { d: v[0], line: v[1] } : { d: v || 0, line: -1 };
+  }
+
+  // ---------- Перетаскивание пальцем ----------
+  let drag = null;
+
+  function geometry() {
+    const sheet = $("sheet");
+    const cs = getComputedStyle(sheet);
+    const m = $("measure");
+    m.style.fontSize = state.font + "px";
+    return {
+      rect: sheet.getBoundingClientRect(),
+      padL: parseFloat(cs.paddingLeft),
+      padT: parseFloat(cs.paddingTop),
+      lineH: parseFloat(cs.lineHeight),
+      charW: m.getBoundingClientRect().width / m.textContent.length,
+      scrollL: sheet.scrollLeft,
+    };
+  }
+
+  // Куда встанет аккорд, если отпустить его в точке (x, y): строка экрана и столбец.
+  // Отпустили на строке со словами — аккорд встаёт в строку аккордов над ней.
+  function dropTarget(x, y, grab) {
+    const g = geometry();
+    let row = Math.floor((y - g.rect.top - g.padT) / g.lineH);
+    const col = Math.max(0, Math.round((x - g.rect.left - g.padL + g.scrollL) / g.charW) - grab);
+    const lines = state.lines || [];
+    if (row < 0 || row >= lines.length) return null;
+    if (!lines[row].d) {
+      const up = lines[row - 1];
+      if (row > 0 && up.d && up.s === lines[row].s - 1) row -= 1;
+      else return null;
+    }
+    return { row, col, g };
+  }
+
+  function showGhost(t) {
+    let ghost = $("ghost");
+    if (!t) { if (ghost) ghost.style.display = "none"; return; }
+    if (!ghost) {
+      ghost = document.createElement("span");
+      ghost.id = "ghost";
+      $("sheet").appendChild(ghost);
+    }
+    ghost.textContent = $("sheet").querySelector(".c.dragging")?.textContent || "";
+    ghost.style.display = "block";
+    ghost.style.left = t.g.padL + t.col * t.g.charW + "px";
+    ghost.style.top = t.g.padT + t.row * t.g.lineH + "px";
+    ghost.style.lineHeight = t.g.lineH + "px";
+  }
+
+  // У верхнего и нижнего края экрана страница сама прокручивается — аккорд можно
+  // перенести далеко, не отпуская.
+  let edgeTimer = 0;
+  function edgeScroll() {
+    clearInterval(edgeTimer);
+    edgeTimer = setInterval(() => {
+      if (!drag || !drag.started) return clearInterval(edgeTimer);
+      const barTop = $("bar").getBoundingClientRect().top;
+      let dy = 0;
+      if (drag.y < 70) dy = -10;
+      else if (drag.y > barTop - 50) dy = 10;
+      if (dy) { window.scrollBy(0, dy); showGhost(dropTarget(drag.x, drag.y, drag.grab)); }
+    }, 30);
+  }
+
+  $("sheet").addEventListener("pointerdown", (e) => {
     if (!state.editing) return;
     const span = e.target.closest(".c.m");
     if (!span) return;
-    state.sel = span.dataset.id;
-    haptic();
-    for (const el of document.querySelectorAll("#sheet .c.sel")) el.classList.remove("sel");
-    span.classList.add("sel");
-    $("edithint").textContent = "Двигайте стрелками; можно удерживать";
+    e.preventDefault();
+    const g = geometry();
+    drag = {
+      el: span, id: span.dataset.id, oc: parseInt(span.dataset.oc, 10),
+      x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, started: false,
+      // за какую букву аккорда взялись — чтобы он не прыгал под пальцем
+      grab: Math.max(0, Math.floor((e.clientX - span.getBoundingClientRect().left) / g.charW)),
+    };
+    span.setPointerCapture(e.pointerId);
   });
+
+  $("sheet").addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (!drag.started) {
+      if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 6) return;
+      drag.started = true;
+      select(drag.el);
+      drag.el.classList.add("dragging");
+      haptic();
+      edgeScroll();
+    }
+    const t = dropTarget(e.clientX, e.clientY, drag.grab);
+    if (t && drag.target && (t.row !== drag.target.row || t.col !== drag.target.col)) haptic();
+    drag.target = t;
+    showGhost(t);
+  });
+
+  function endDrag(e, cancel) {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    clearInterval(edgeTimer);
+    showGhost(null);
+    d.el.classList.remove("dragging");
+    if (!d.started) {           // просто нажали — выбрать аккорд
+      if (!cancel) { select(d.el); haptic(); }
+      return;
+    }
+    const t = cancel ? null : dropTarget(e.clientX, e.clientY, d.grab);
+    if (!t) return;             // отпустили не над строкой аккордов — аккорд остаётся на месте
+    const ln = state.lines[t.row];
+    const targetLine = ln.s;
+    const targetCol = ln.o + t.col;
+    setMove(d.id, targetCol - d.oc, targetLine);
+  }
+  $("sheet").addEventListener("pointerup", (e) => endDrag(e, false));
+  $("sheet").addEventListener("pointercancel", (e) => endDrag(e, true));
 
   function nudge(delta) {
     if (!state.sel) {
       $("edithint").textContent = "Сначала нажмите на аккорд";
       return;
     }
-    const mv = loadMoves(state.title);
-    mv.rev = state.rev;
-    const d = (mv.m[state.sel] || 0) + delta;
-    if (d) mv.m[state.sel] = d; else delete mv.m[state.sel];
-    saveMoves(state.title, mv);
+    const cur = getMove(state.sel);
     haptic();
-    load();
+    setMove(state.sel, cur.d + delta, cur.line);
   }
   // Удержание кнопки двигает аккорд дальше, пока её не отпустят.
   function holdRepeat(btn, fn) {

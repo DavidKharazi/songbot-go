@@ -63,8 +63,8 @@ func TestSongWithLocalMoves(t *testing.T) {
 	s := testServer()
 	var plain songResponse
 	json.Unmarshal(get(t, s, "/api/song?"+url.Values{"title": {"Песня"}}.Encode()).Body.Bytes(), &plain)
-	am := plain.Lines[0].Chords[1] // [начало, конец, строка, номер]
-	if len(am) != 4 || am[0] != 10 {
+	am := plain.Lines[0].Chords[1] // [начало, конец, строка, номер, исходный столбец]
+	if len(am) != 5 || am[0] != 10 || am[4] != 10 || !plain.Lines[0].Drop || plain.Lines[1].Drop {
 		t.Fatalf("у Am нет адреса или неверный столбец: %v", am)
 	}
 
