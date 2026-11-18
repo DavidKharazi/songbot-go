@@ -75,3 +75,36 @@ func TestMoveToAnotherLine(t *testing.T) {
 		t.Fatalf("получено %q", got)
 	}
 }
+
+func TestEditReplaceDeleteAdd(t *testing.T) {
+	s := Parse(movesSample, "") // "Em          Am         Hm"
+	first := func(s *Song, shift int) string { return strings.Split(s.Transpose(shift), "\n")[0] }
+
+	// Замена: пользователь смотрел в тональности +2 (F#m) и ввёл "C#7" вместо C#m (бывший Hm).
+	// В исходной тональности это H7, а при +2 снова C#7.
+	ed, bad := s.WithEdits(map[ChordID]Edit{{0, 2}: {Text: "C#7", At: 2, Line: -1}})
+	if len(bad) != 0 || first(ed, 0) != "Em          Am         H7" || first(ed, 2) != "F#m         Hm         C#7" {
+		t.Fatalf("замена: %q / %q (bad %v)", first(ed, 0), first(ed, 2), bad)
+	}
+
+	// Удаление.
+	ed, _ = s.WithEdits(map[ChordID]Edit{{0, 1}: {Delete: true, Line: -1}})
+	if first(ed, 0) != "Em"+strings.Repeat(" ", 21)+"Hm" {
+		t.Fatalf("удаление: %q", first(ed, 0))
+	}
+
+	// Добавление: новый аккорд D в столбец 6 строки 0; у него свой адрес, его можно двигать.
+	ed, _ = s.WithEdits(map[ChordID]Edit{{NewChordLine, 1}: {Line: 0, Delta: 6, Text: "D"}})
+	if first(ed, 0) != "Em    D     Am         Hm" {
+		t.Fatalf("добавление: %q", first(ed, 0))
+	}
+	if sp := ed.Render(0, 0)[0].Spans[1]; sp.ID == nil || *sp.ID != (ChordID{NewChordLine, 1}) || sp.OrigCol != 0 {
+		t.Fatalf("адрес нового аккорда: %+v", sp)
+	}
+
+	// Не аккорд — правка не применяется и возвращается как ошибочная.
+	ed, bad = s.WithEdits(map[ChordID]Edit{{0, 0}: {Text: "Привет", Line: -1}, {NewChordLine, 2}: {Line: 0, Text: "xyz"}})
+	if len(bad) != 2 || first(ed, 0) != "Em          Am         Hm" {
+		t.Fatalf("ошибочные правки: %q bad=%v", first(ed, 0), bad)
+	}
+}

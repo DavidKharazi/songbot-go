@@ -22,6 +22,45 @@ type Move struct {
 	Line  int
 }
 
+// Edit — правка аккорда пользователем.
+//
+// Для аккорда из текста песни (ID.Line >= 0): Delta и Line — как в Move; Text, если не
+// пусто, заменяет аккорд (записан в тональности со сдвигом At относительно исходной);
+// Delete убирает аккорд.
+//
+// Для нового аккорда (ID.Line == -1, ID.Token — его номер): Line — строка аккордов,
+// куда он поставлен, Delta — столбец в ней, Text и At — сам аккорд.
+type Edit struct {
+	Delta  int
+	Line   int
+	Text   string
+	At     int
+	Delete bool
+}
+
+// NewChordLine — значение ChordID.Line у аккордов, добавленных пользователем.
+const NewChordLine = -1
+
+// NormalizeChord проверяет, что text — аккорд (или несколько через дефис, "Em-D"),
+// и переводит его из тональности со сдвигом fromShift в исходную тональность песни.
+func (s *Song) NormalizeChord(text string, fromShift int) (string, bool) {
+	text = strings.TrimSpace(text)
+	parts := parseCompound(text)
+	if parts == nil || latinChords(parts) == 0 || strings.ContainsAny(text, " \t") {
+		return "", false
+	}
+	sp := spellerFor(s.n, s.Key)
+	var b strings.Builder
+	for _, p := range parts {
+		if c, ok := transposeChord(p.text, -fromShift, s.n, sp); p.isChord && ok {
+			b.WriteString(c)
+		} else {
+			b.WriteString(p.text)
+		}
+	}
+	return b.String(), true
+}
+
 // Rev — короткий отпечаток исходного текста. Если текст песни изменится (например,
 // в репозитории поправят .txt), старые правки к нему уже не подходят.
 func (s *Song) Rev() string {
@@ -36,7 +75,8 @@ func (s *Song) base() *Song {
 	return s
 }
 
-// OrigCol — столбец, в котором аккорд стоит в исходном тексте (до правок).
+// OrigCol — столбец, в котором аккорд стоит в исходном тексте (до правок);
+// для добавленных пользователем аккордов — 0 (их Delta и есть столбец).
 func (s *Song) OrigCol(id ChordID) int {
 	b := s.base()
 	if id.Line < 0 || id.Line >= len(b.lines) {
@@ -57,16 +97,28 @@ func (s *Song) idAt(line, k int) ChordID {
 	return ChordID{Line: line, Token: k}
 }
 
-// WithMoves возвращает копию песни с перемещёнными аккордами. Двигать и принимать
-// аккорды могут только строки, состоящие из одних аккордов. Если аккорд «встал» на
-// соседа, они расходятся: между аккордами всегда остаётся хотя бы один пробел,
-// а левее начала строки аккорд не уходит.
+// WithMoves возвращает копию песни с перемещёнными аккордами (см. WithEdits).
 func (s *Song) WithMoves(moves map[ChordID]Move) *Song {
+	edits := make(map[ChordID]Edit, len(moves))
+	for id, m := range moves {
+		edits[id] = Edit{Delta: m.Delta, Line: m.Line}
+	}
+	s2, _ := s.WithEdits(edits)
+	return s2
+}
+
+// WithEdits возвращает копию песни с правками пользователя: перемещёнными, изменёнными,
+// удалёнными и добавленными аккордами. Двигать и принимать аккорды могут только строки,
+// состоящие из одних аккордов. Если аккорд «встал» на соседа, перемещённый занимает
+// своё место, а сосед отодвигается; между аккордами всегда остаётся пробел.
+// bad — правки, которые не удалось применить (например, введён не аккорд).
+func (s *Song) WithEdits(edits map[ChordID]Edit) (out *Song, bad []ChordID) {
 	b := s.base()
 	isChordLine := make([]bool, len(b.lines))
 	for i, l := range b.lines {
 		isChordLine[i] = IsChordLine(l)
 	}
+	validLine := func(l int) bool { return l >= 0 && l < len(b.lines) && isChordLine[l] }
 
 	type item struct {
 		id    ChordID
@@ -76,17 +128,38 @@ func (s *Song) WithMoves(moves map[ChordID]Move) *Song {
 	}
 	buckets := map[int][]item{}
 	touched := map[int]bool{}
-	for id, mv := range moves {
-		if id.Line < 0 || id.Line >= len(b.lines) || !isChordLine[id.Line] {
+
+	// Новые аккорды.
+	for id, e := range edits {
+		if id.Line != NewChordLine {
+			continue
+		}
+		text, ok := b.NormalizeChord(e.Text, e.At)
+		if !ok || !validLine(e.Line) || e.Delete {
+			if !e.Delete {
+				bad = append(bad, id)
+			}
+			continue
+		}
+		want := e.Delta
+		if want < 0 {
+			want = 0
+		}
+		touched[e.Line] = true
+		buckets[e.Line] = append(buckets[e.Line], item{id, text, want, true})
+	}
+	// Правки аккордов из текста: какие строки они затрагивают.
+	for id, e := range edits {
+		if id.Line == NewChordLine || !validLine(id.Line) {
 			continue
 		}
 		touched[id.Line] = true
-		if mv.Line >= 0 && mv.Line < len(b.lines) && isChordLine[mv.Line] {
-			touched[mv.Line] = true
+		if validLine(e.Line) {
+			touched[e.Line] = true
 		}
 	}
 	if len(touched) == 0 {
-		return b
+		return b, bad
 	}
 
 	for li := range b.lines {
@@ -95,12 +168,22 @@ func (s *Song) WithMoves(moves map[ChordID]Move) *Song {
 		}
 		for k, t := range tokenize([]rune(b.lines[li])) {
 			id := ChordID{Line: li, Token: k}
-			target, want, moved := li, t.start, false
-			if mv, ok := moves[id]; ok {
-				want += mv.Delta
-				moved = true
-				if mv.Line >= 0 && mv.Line < len(b.lines) && isChordLine[mv.Line] {
-					target = mv.Line
+			target, want, moved, text := li, t.start, false, t.text
+			if e, ok := edits[id]; ok {
+				if e.Delete {
+					continue
+				}
+				want += e.Delta
+				moved = e.Delta != 0 || validLine(e.Line)
+				if validLine(e.Line) {
+					target = e.Line
+				}
+				if e.Text != "" {
+					if norm, ok := b.NormalizeChord(e.Text, e.At); ok {
+						text = norm
+					} else {
+						bad = append(bad, id)
+					}
 				}
 			}
 			if !touched[target] {
@@ -109,7 +192,7 @@ func (s *Song) WithMoves(moves map[ChordID]Move) *Song {
 			if want < 0 {
 				want = 0
 			}
-			buckets[target] = append(buckets[target], item{id, t.text, want, moved})
+			buckets[target] = append(buckets[target], item{id, text, want, moved})
 		}
 	}
 
@@ -149,7 +232,7 @@ func (s *Song) WithMoves(moves map[ChordID]Move) *Song {
 		cp.lines[li] = string(out)
 		cp.ids[li] = ids
 	}
-	return &cp
+	return &cp, bad
 }
 
 // Span — участок строки с аккордом. ID задан, если аккорд можно двигать;
