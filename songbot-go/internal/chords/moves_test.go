@@ -108,3 +108,43 @@ func TestEditReplaceDeleteAdd(t *testing.T) {
 		t.Fatalf("ошибочные правки: %q bad=%v", first(ed, 0), bad)
 	}
 }
+
+func TestLayoutLinePinnedExact(t *testing.T) {
+	// Неподвижные аккорды в столбцах 0, 4, 8; перетащенный (длина 3) — точно в столбец 3,
+	// поверх второго. Он встаёт ровно на 3, а соседи раздвигаются, сохраняя порядок.
+	got := layoutLine([]lineItem{
+		{n: 2, want: 0}, {n: 2, want: 4}, {n: 2, want: 8},
+		{n: 3, want: 3, pinned: true, order: 1},
+	})
+	pos := map[int]int{}
+	for _, p := range got {
+		pos[p.idx] = p.start
+	}
+	if pos[3] != 3 {
+		t.Fatalf("перетащенный аккорд не на своём месте: %v", got)
+	}
+	if !(pos[0] < pos[1] && pos[1] < pos[2]) {
+		t.Fatalf("неподвижные аккорды поменялись местами: %v", got)
+	}
+	for i := range got {
+		for j := range got {
+			a, b := got[i], got[j]
+			if i != j && a.start <= b.start && a.start+[]int{2, 2, 2, 3}[a.idx] >= b.start {
+				t.Fatalf("аккорды налезают или без пробела: %v", got)
+			}
+		}
+	}
+}
+
+func TestLayoutLineNewestPinnedWins(t *testing.T) {
+	// Два перетащенных аккорда хотят столбец 5 — его получает перетащенный последним.
+	got := layoutLine([]lineItem{
+		{n: 2, want: 5, pinned: true, order: 10},
+		{n: 2, want: 5, pinned: true, order: 20},
+	})
+	for _, p := range got {
+		if p.idx == 1 && p.start != 5 {
+			t.Fatalf("последний перетащенный должен стоять на 5: %v", got)
+		}
+	}
+}
