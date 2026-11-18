@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"songbot/internal/chords"
@@ -89,8 +90,10 @@ type keyOption struct {
 }
 
 type line struct {
-	Text   string   `json:"t"`
-	Chords [][2]int `json:"c,omitempty"` // где в строке аккорды (для подсветки)
+	Text string `json:"t"`
+	// Где в строке аккорды: [начало, конец] или, если аккорд можно двигать,
+	// [начало, конец, строка, номер] — постоянный адрес аккорда в исходном тексте.
+	Chords [][]int `json:"c,omitempty"`
 }
 
 type songResponse struct {
@@ -102,6 +105,7 @@ type songResponse struct {
 	OrigKey string      `json:"origKey,omitempty"`
 	Capo    int         `json:"capo,omitempty"` // лад каподастра для игры аккордами исходной тональности
 	Keys    []keyOption `json:"keys,omitempty"`
+	Rev     string      `json:"rev"` // отпечаток текста песни: правки привязаны к нему
 	Lines   []line      `json:"lines"`
 }
 
@@ -119,12 +123,14 @@ func (s *Server) handleSong(w http.ResponseWriter, r *http.Request) {
 	shift = ((shift % 12) + 12) % 12
 	width, _ := strconv.Atoi(q.Get("width"))
 
-	text := song.Transpose(shift)
-	if width >= 16 {
-		text = chords.Wrap(text, width)
+	rev := song.Rev()
+	// Правки положения аккордов хранятся только в телефоне и приходят с запросом,
+	// если они сделаны для этой же версии текста песни.
+	if q.Get("rev") == rev {
+		song = song.WithMoves(parseMoves(q.Get("moves")))
 	}
 
-	resp := songResponse{Title: title, Shift: shift, Display: shift, HasKey: song.HasKey}
+	resp := songResponse{Title: title, Shift: shift, Display: shift, HasKey: song.HasKey, Rev: rev}
 	if resp.Display > 6 {
 		resp.Display -= 12
 	}
@@ -142,22 +148,44 @@ func (s *Server) handleSong(w http.ResponseWriter, r *http.Request) {
 			return (root+resp.Keys[i].Shift)%12 < (root+resp.Keys[j].Shift)%12
 		})
 	}
-	for _, t := range splitLines(text) {
-		resp.Lines = append(resp.Lines, line{Text: t, Chords: chords.ChordSpans(t)})
+	for _, rl := range song.Render(shift, width) {
+		l := line{Text: rl.Text}
+		for _, sp := range rl.Spans {
+			if sp.ID != nil {
+				l.Chords = append(l.Chords, []int{sp.Start, sp.End, sp.ID.Line, sp.ID.Token})
+			} else {
+				l.Chords = append(l.Chords, []int{sp.Start, sp.End})
+			}
+		}
+		resp.Lines = append(resp.Lines, l)
 	}
 	writeJSON(w, resp)
 }
 
-func splitLines(text string) []string {
-	var out []string
-	start := 0
-	for i := 0; i < len(text); i++ {
-		if text[i] == '\n' {
-			out = append(out, text[start:i])
-			start = i + 1
-		}
+// parseMoves разбирает правки вида "строка.номер.сдвиг,строка.номер.сдвиг".
+// Некорректные части пропускаются; размер и величина сдвигов ограничены.
+func parseMoves(raw string) map[chords.ChordID]int {
+	moves := map[chords.ChordID]int{}
+	if raw == "" {
+		return moves
 	}
-	return append(out, text[start:])
+	for i, item := range strings.Split(raw, ",") {
+		if i >= 2000 {
+			break
+		}
+		f := strings.Split(item, ".")
+		if len(f) != 3 {
+			continue
+		}
+		l, err1 := strconv.Atoi(f[0])
+		k, err2 := strconv.Atoi(f[1])
+		d, err3 := strconv.Atoi(f[2])
+		if err1 != nil || err2 != nil || err3 != nil || l < 0 || k < 0 || d < -500 || d > 500 {
+			continue
+		}
+		moves[chords.ChordID{Line: l, Token: k}] = d
+	}
+	return moves
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {

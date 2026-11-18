@@ -58,3 +58,27 @@ func TestUnknownSongAndIndex(t *testing.T) {
 		t.Fatalf("список песен: %s", rec.Body)
 	}
 }
+
+func TestSongWithLocalMoves(t *testing.T) {
+	s := testServer()
+	var plain songResponse
+	json.Unmarshal(get(t, s, "/api/song?"+url.Values{"title": {"Песня"}}.Encode()).Body.Bytes(), &plain)
+	am := plain.Lines[0].Chords[1] // [начало, конец, строка, номер]
+	if len(am) != 4 || am[0] != 10 {
+		t.Fatalf("у Am нет адреса или неверный столбец: %v", am)
+	}
+
+	moved := func(rev string) []int {
+		var r songResponse
+		q := url.Values{"title": {"Песня"}, "rev": {rev}, "moves": {"0.1.3,мусор,9.9"}}
+		json.Unmarshal(get(t, s, "/api/song?"+q.Encode()).Body.Bytes(), &r)
+		return r.Lines[0].Chords[1]
+	}
+	if got := moved(plain.Rev); got[0] != 13 {
+		t.Fatalf("Am должен сдвинуться на 3 вправо: %v", got)
+	}
+	// Правки к другой версии текста не применяются.
+	if got := moved("старый"); got[0] != 10 {
+		t.Fatalf("правки к другой версии текста не должны применяться: %v", got)
+	}
+}
