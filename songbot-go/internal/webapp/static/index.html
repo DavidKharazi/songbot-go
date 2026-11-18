@@ -41,9 +41,9 @@
   #list { padding: 12px 16px 24px; }
   .top { display: flex; align-items: center; gap: 8px; }
   .top > :first-child { flex: 1; min-width: 0; }
-  .theme-btn { flex: 0 0 auto; width: 38px; height: 38px; border: 0; border-radius: 10px;
+  .theme-btn, .icon-btn { flex: 0 0 auto; width: 38px; height: 38px; border: 0; border-radius: 10px;
     background: var(--bg2); cursor: pointer; font-size: 18px; line-height: 1; }
-  .theme-btn:active { opacity: .6; }
+  .theme-btn:active, .icon-btn:active { opacity: .6; }
   #list .top { margin-bottom: 8px; }
   #search { width: 100%; padding: 10px 12px; border: 0; border-radius: 10px;
     background: var(--bg2); outline: none; }
@@ -61,6 +61,14 @@
   #sheet { margin: 0; padding: 6px 16px 120px; font-family: var(--mono);
     white-space: pre; overflow-x: auto; line-height: 1.25; }
   #sheet .c { color: var(--chord); font-weight: 700; }
+  /* Режим правки: аккорды, которые можно двигать, обведены; выбранный — залит. */
+  #sheet.editing .c.m { outline: 1px dashed currentColor; outline-offset: 1px; border-radius: 3px; cursor: pointer; }
+  #sheet.editing .c.sel { background: var(--chord); color: var(--bg); outline: none; }
+  #editbar { display: none; }
+  #bar.editing .normal { display: none; }
+  #bar.editing #editbar { display: grid; gap: 6px; }
+  .hint { color: var(--hint); font-size: 13px; text-align: center; }
+  .icon-btn.on { background: var(--accent); color: var(--accent-text); }
   /* Служебный элемент для измерения ширины символа. Контейнер нулевого размера, чтобы он
      не растягивал страницу (иначе телефон считает экран шире и панель уезжает за край). */
   #measurebox { position: absolute; top: 0; left: 0; width: 0; height: 0; overflow: hidden; }
@@ -98,24 +106,34 @@
   <header>
     <div class="top">
       <h1 id="title"></h1>
+      <button class="icon-btn" id="edit" type="button" title="Двигать аккорды" aria-label="Двигать аккорды">✏️</button>
       <button class="theme-btn" type="button"></button>
     </div>
     <div id="keyline"></div>
   </header>
   <pre id="sheet"></pre>
   <div id="bar">
-    <div class="row">
+    <div class="row normal">
       <button class="btn" id="down" aria-label="на полтона ниже">−½</button>
       <select class="btn" id="key" aria-label="тональность"></select>
       <button class="btn" id="up" aria-label="на полтона выше">+½</button>
       <button class="btn" id="reset" aria-label="исходная тональность">↺</button>
     </div>
-    <div class="row">
+    <div class="row normal">
       <button class="btn" id="smaller" aria-label="шрифт меньше">A−</button>
       <button class="btn" id="bigger" aria-label="шрифт больше">A+</button>
       <button class="btn" id="wrap" aria-label="перенос строк">⤶ Перенос</button>
       <button class="btn" id="scroll" aria-label="автопрокрутка">▶ Прокрутка</button>
       <span id="speed"></span>
+    </div>
+    <div id="editbar">
+      <div class="hint" id="edithint">Нажмите на аккорд, затем двигайте его стрелками</div>
+      <div class="row">
+        <button class="btn" id="left" aria-label="аккорд левее">←</button>
+        <button class="btn" id="right" aria-label="аккорд правее">→</button>
+        <button class="btn" id="pdf" aria-label="вернуть аккорды как в PDF">↺ Как в PDF</button>
+        <button class="btn on" id="done">✓ Готово</button>
+      </div>
     </div>
   </div>
 </section>
@@ -141,7 +159,21 @@
     wrap: store.get("wrap", true),
     speed: store.get("speed", 2),     // 1..5
     scrolling: false,
+    editing: false,
+    sel: null,   // выбранный аккорд в режиме правки: "строка.номер"
+    rev: "",     // отпечаток текста песни из последнего ответа сервера
   };
+
+  // ---------- Правки положения аккордов: хранятся только в этом телефоне ----------
+  // moves.<песня> = { rev: отпечаток текста, m: { "строка.номер": сдвиг } }
+  function loadMoves(title) {
+    const v = store.get("moves." + title, null);
+    return v && v.m ? v : { rev: "", m: {} };
+  }
+  function saveMoves(title, v) {
+    if (Object.keys(v.m).length) store.set("moves." + title, v);
+    else { try { localStorage.removeItem("chords.moves." + title); } catch {} }
+  }
 
   if (tg && tg.initData !== undefined) {
     document.documentElement.classList.add("tg");
@@ -210,6 +242,8 @@
   }
   async function showList() {
     stopScroll();
+    state.editing = false;
+    state.sel = null;
     state.title = null;
     $("song").style.display = "none";
     $("list").style.display = "block";
@@ -253,6 +287,9 @@
   async function load() {
     const id = ++reqId;
     const params = new URLSearchParams({ title: state.title, shift: state.shift, width: state.wrap ? columns() : 0 });
+    const mv = loadMoves(state.title);
+    const list = Object.entries(mv.m).map(([id, d]) => id + "." + d);
+    if (list.length) { params.set("rev", mv.rev); params.set("moves", list.join(",")); }
     let data;
     try {
       const r = await fetch("api/song?" + params);
@@ -280,6 +317,16 @@
     }
     if (d.capo) kl.append(` · или каподастр на ${d.capo} лад и аккорды из ${d.hasKey ? d.origKey : "исходной"}`);
 
+    // Если текст песни обновился (поправили в репозитории), старые правки к нему не подходят.
+    state.rev = d.rev;
+    const mv = loadMoves(d.title);
+    if (Object.keys(mv.m).length && mv.rev !== d.rev) {
+      saveMoves(d.title, { rev: d.rev, m: {} });
+      kl.append(" · текст песни обновился, ваши правки аккордов сброшены");
+    } else if (Object.keys(mv.m).length) {
+      kl.append(" · ✏️ с вашими правками");
+    }
+
     const sel = $("key");
     sel.textContent = "";
     if (d.hasKey) {
@@ -305,10 +352,15 @@
     d.lines.forEach((ln, i) => {
       const chars = Array.from(ln.t);
       let pos = 0;
-      for (const [a, b] of ln.c || []) {
+      for (const [a, b, l, k] of ln.c || []) {
         if (a > pos) frag.append(chars.slice(pos, a).join(""));
         const s = document.createElement("span");
         s.className = "c";
+        if (l !== undefined) {
+          s.classList.add("m");
+          s.dataset.id = l + "." + k;
+          if (s.dataset.id === state.sel) s.classList.add("sel");
+        }
         s.textContent = chars.slice(a, b).join("");
         frag.append(s);
         pos = b;
@@ -318,6 +370,12 @@
     });
     sheet.textContent = "";
     sheet.appendChild(frag);
+    sheet.classList.toggle("editing", state.editing);
+    $("bar").classList.toggle("editing", state.editing);
+    $("edit").classList.toggle("on", state.editing);
+    $("edithint").textContent = state.sel
+      ? "Двигайте стрелками; можно удерживать"
+      : "Нажмите на аккорд, затем двигайте его стрелками";
 
     $("wrap").classList.toggle("on", state.wrap);
     $("speed").textContent = "×" + state.speed;
@@ -339,6 +397,62 @@
   $("smaller").onclick = () => { state.font = Math.max(10, state.font - 1); store.set("font", state.font); load(); };
   $("bigger").onclick = () => { state.font = Math.min(32, state.font + 1); store.set("font", state.font); load(); };
   $("wrap").onclick = () => { state.wrap = !state.wrap; store.set("wrap", state.wrap); load(); };
+
+  // ---------- Режим правки ----------
+  function setEditing(on) {
+    state.editing = on;
+    state.sel = null;
+    if (on) stopScroll();
+    load();
+  }
+  $("edit").onclick = () => setEditing(!state.editing);
+  $("done").onclick = () => setEditing(false);
+
+  $("sheet").addEventListener("click", (e) => {
+    if (!state.editing) return;
+    const span = e.target.closest(".c.m");
+    if (!span) return;
+    state.sel = span.dataset.id;
+    haptic();
+    for (const el of document.querySelectorAll("#sheet .c.sel")) el.classList.remove("sel");
+    span.classList.add("sel");
+    $("edithint").textContent = "Двигайте стрелками; можно удерживать";
+  });
+
+  function nudge(delta) {
+    if (!state.sel) {
+      $("edithint").textContent = "Сначала нажмите на аккорд";
+      return;
+    }
+    const mv = loadMoves(state.title);
+    mv.rev = state.rev;
+    const d = (mv.m[state.sel] || 0) + delta;
+    if (d) mv.m[state.sel] = d; else delete mv.m[state.sel];
+    saveMoves(state.title, mv);
+    haptic();
+    load();
+  }
+  // Удержание кнопки двигает аккорд дальше, пока её не отпустят.
+  function holdRepeat(btn, fn) {
+    let timer = 0, interval = 0;
+    const stop = () => { clearTimeout(timer); clearInterval(interval); };
+    btn.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      fn();
+      timer = setTimeout(() => { interval = setInterval(fn, 110); }, 400);
+    });
+    for (const ev of ["pointerup", "pointerleave", "pointercancel"]) btn.addEventListener(ev, stop);
+    btn.addEventListener("contextmenu", (e) => e.preventDefault());
+  }
+  holdRepeat($("left"), () => nudge(-1));
+  holdRepeat($("right"), () => nudge(1));
+
+  $("pdf").onclick = () => {
+    const reset = () => { saveMoves(state.title, { rev: state.rev, m: {} }); state.sel = null; load(); };
+    const msg = "Вернуть все аккорды этой песни на места, как в PDF? Ваши правки удалятся.";
+    if (tg && tg.showConfirm && tg.initData) tg.showConfirm(msg, (ok) => ok && reset());
+    else if (confirm(msg)) reset();
+  };
 
   // При повороте экрана перестраиваем перенос строк под новую ширину.
   let resizeTimer;

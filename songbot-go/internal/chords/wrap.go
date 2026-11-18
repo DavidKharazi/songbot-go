@@ -7,21 +7,40 @@ import "strings"
 // поэтому аккорды остаются над своими слогами. Место переноса выбирается там,
 // где в словах пробел, а в аккордах ничего не разрывается.
 func Wrap(text string, width int) string {
+	wrapped := WrapMapped(text, width)
+	out := make([]string, len(wrapped))
+	for i, l := range wrapped {
+		out[i] = l.Text
+	}
+	return strings.Join(out, "\n")
+}
+
+// WrappedLine — строка после переноса и её место в исходном тексте:
+// символ в столбце x этой строки — это символ в столбце Offset+x строки Src.
+type WrappedLine struct {
+	Text   string
+	Src    int
+	Offset int
+}
+
+// WrapMapped делает то же, что Wrap, но для каждой строки результата сообщает,
+// из какой строки и с какого столбца исходного текста она взята.
+func WrapMapped(text string, width int) []WrappedLine {
 	lines := strings.Split(text, "\n")
-	var out []string
+	var out []WrappedLine
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimRight(lines[i], " ")
 		if IsChordLine(line) && i+1 < len(lines) {
 			next := strings.TrimRight(lines[i+1], " ")
 			if strings.TrimSpace(next) != "" && !IsChordLine(next) {
-				out = append(out, wrapPair([]rune(line), []rune(next), width)...)
+				out = append(out, wrapPair([]rune(line), []rune(next), width, i)...)
 				i++
 				continue
 			}
 		}
-		out = append(out, wrapSingle([]rune(line), width)...)
+		out = append(out, wrapSingle([]rune(line), width, i)...)
 	}
-	return strings.Join(out, "\n")
+	return out
 }
 
 func at(r []rune, i int) rune {
@@ -38,9 +57,10 @@ func maxInt(a, b int) int {
 	return b
 }
 
-// wrapPair переносит пару «аккорды + слова».
-func wrapPair(chordLine, lyric []rune, width int) []string {
-	var out []string
+// wrapPair переносит пару «аккорды + слова» (строки src и src+1).
+func wrapPair(chordLine, lyric []rune, width, src int) []WrappedLine {
+	var out []WrappedLine
+	offset := 0
 	for maxInt(len(chordLine), len(lyric)) > width {
 		cut := -1
 		// Ищем самый правый пробел в словах, в котором не разрывается аккорд.
@@ -62,20 +82,24 @@ func wrapPair(chordLine, lyric []rune, width int) []string {
 		if cut <= 0 {
 			break
 		}
-		out = append(out, rtrim(slice(chordLine, 0, cut)), rtrim(slice(lyric, 0, cut)))
+		out = append(out,
+			WrappedLine{rtrim(slice(chordLine, 0, cut)), src, offset},
+			WrappedLine{rtrim(slice(lyric, 0, cut)), src + 1, offset})
 		chordLine, lyric = slice(chordLine, cut, len(chordLine)), slice(lyric, cut, len(lyric))
 		// Убираем общий отступ, сохраняя взаимное положение аккордов и слов.
 		trim := minInt(leading(chordLine), leading(lyric))
 		chordLine, lyric = slice(chordLine, trim, len(chordLine)), slice(lyric, trim, len(lyric))
+		offset += cut + minInt(trim, 1<<20)
 	}
-	return append(out, rtrim(chordLine), rtrim(lyric))
+	return append(out, WrappedLine{rtrim(chordLine), src, offset}, WrappedLine{rtrim(lyric), src + 1, offset})
 }
 
 // wrapSingle переносит одиночную строку по пробелам. Сначала пробует разрезать по широкому
 // промежутку (два и больше пробела) — так название песни отделяется от аккордов,
 // записанных справа от него, а не рвётся посреди "// Em - Em //".
-func wrapSingle(line []rune, width int) []string {
-	var out []string
+func wrapSingle(line []rune, width, src int) []WrappedLine {
+	var out []WrappedLine
+	offset := 0
 	for len(line) > width {
 		cut := -1
 		for c := width; c > 0; c-- {
@@ -95,11 +119,13 @@ func wrapSingle(line []rune, width int) []string {
 		if cut <= 0 {
 			break
 		}
-		out = append(out, rtrim(line[:cut]))
+		out = append(out, WrappedLine{rtrim(line[:cut]), src, offset})
 		line = line[cut:]
-		line = slice(line, leading(line), len(line))
+		lead := minInt(leading(line), len(line))
+		line = line[lead:]
+		offset += cut + lead
 	}
-	return append(out, rtrim(line))
+	return append(out, WrappedLine{rtrim(line), src, offset})
 }
 
 func slice(r []rune, from, to int) []rune {
