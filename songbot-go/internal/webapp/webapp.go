@@ -132,6 +132,7 @@ type editInput struct {
 	Text string `json:"text"` // новый текст аккорда
 	At   int    `json:"at"`   // тональность (сдвиг), в которой введён текст
 	Del  bool   `json:"del"`
+	O    int64  `json:"o"` // когда аккорд двигали (больше — позже)
 }
 
 const maxEdits = 2000
@@ -150,7 +151,7 @@ func (in songRequest) edits() map[chords.ChordID]chords.Edit {
 		if e.Line != nil {
 			line = *e.Line
 		}
-		out[id] = chords.Edit{Delta: e.D, Line: line, Text: e.Text, At: e.At, Delete: e.Del}
+		out[id] = chords.Edit{Delta: e.D, Line: line, Text: e.Text, At: e.At, Delete: e.Del, Order: e.O}
 	}
 	return out
 }

@@ -62,8 +62,11 @@
     white-space: pre; overflow-x: auto; line-height: 1.25; position: relative; }
   #sheet .c { color: var(--chord); font-weight: 700; }
   /* Режим правки: аккорды, которые можно двигать, обведены; выбранный — залит. */
-  #sheet.editing .c.m { outline: 1px dashed currentColor; outline-offset: 1px; border-radius: 3px; cursor: pointer; }
-  #sheet.editing .c.sel { background: var(--chord); color: var(--bg); outline: none; }
+  /* В режиме правки у аккорда большая невидимая зона касания (padding), а отрицательные
+     поля компенсируют её — раскладка текста не меняется. Рамка и заливка — по самому аккорду. */
+  #sheet.editing .c.m { padding: 8px 7px; margin: -8px -7px; outline: 1px dashed currentColor;
+    outline-offset: -6px; border-radius: 9px; cursor: grab; background-clip: content-box; }
+  #sheet.editing .c.sel { background-color: var(--chord); color: var(--bg); outline: none; }
   /* Перетаскивание пальцем: аккорд не прокручивает страницу, пока его тянут. */
   #sheet.editing { user-select: none; -webkit-user-select: none; }
   #sheet.editing .c.m { display: inline-block; touch-action: none; }
@@ -327,9 +330,11 @@
     const id = ++reqId;
     const mv = loadMoves(state.title);
     const edits = {};
+    const sent = {};   // правки, по которым сервер построит ответ
     for (const id of Object.keys(mv.m)) {
       const e = getEdit(id);
-      edits[id] = { d: e.d, line: e.line, text: e.text, at: e.at, del: e.del };
+      sent[id] = e;
+      edits[id] = { d: e.d, line: e.line, text: e.text, at: e.at, del: e.del, o: e.o };
     }
     const body = { title: state.title, shift: state.shift, width: state.wrap ? columns() : 0, rev: mv.rev, edits };
     let data;
@@ -341,10 +346,10 @@
       return showError("Не удалось загрузить песню. " + (e.message || ""));
     }
     if (id !== reqId) return; // пришёл ответ на устаревший запрос
-    render(data);
+    render(data, sent);
   }
 
-  function render(d) {
+  function render(d, sent = {}) {
     state.lines = d.lines;
     // Правки, которые сервер не смог применить (введён не аккорд), убираем.
     if (d.bad && d.bad.length) {
@@ -429,10 +434,17 @@
     sheet.style.setProperty("--cw", g.charW + "px");
     sheet.style.setProperty("--lh", g.lineH + "px");
     for (const el of sheet.querySelectorAll(".c.m")) {
+      // Аккорд нарисован сервером по правке, отправленной с запросом (rd). Если пока
+      // ответ шёл её успели изменить (стрелками), разницу показываем смещением.
       const e = getEdit(el.dataset.id);
+      const rd = (sent[el.dataset.id] || {}).d || 0;
+      el.dataset.rd = rd;
+      const dx = (e.d || 0) - rd + (e.fx || 0);
       // transform не действует на строчные элементы — делаем аккорд inline-block
-      if (e.fx || e.fy) el.style.display = "inline-block";
-      if (e.fx || e.fy) el.style.transform = `translate(calc(var(--cw) * ${e.fx || 0}), calc(var(--lh) * ${e.fy || 0}))`;
+      if (dx || e.fy) {
+        el.style.display = "inline-block";
+        el.style.transform = `translate(calc(var(--cw) * ${dx}), calc(var(--lh) * ${e.fy || 0}))`;
+      }
     }
     sheet.classList.toggle("editing", state.editing);
     $("bar").classList.toggle("editing", state.editing);
@@ -473,7 +485,7 @@
     if (Array.isArray(v)) return { d: v[0], line: v[1] };
     return Object.assign({ d: 0 }, v || {});
   }
-  function setEdit(id, e) {
+  function setEdit(id, e, defer) {
     const mv = loadMoves(state.title);
     mv.rev = state.rev;
     const clean = {};
@@ -483,11 +495,16 @@
     if (Math.abs(e.fy || 0) > 0.01) clean.fy = +e.fy.toFixed(3);
     if (e.text) { clean.text = e.text; clean.at = e.at || 0; }
     if (e.del) clean.del = true;
+    if (e.o && (clean.d !== undefined || clean.line !== undefined)) clean.o = e.o;
     if (id.startsWith("-1.") && clean.d === undefined) clean.d = 0;
     if (Object.keys(clean).length) mv.m[id] = clean; else delete mv.m[id];
     saveMoves(state.title, mv);
-    load();
+    clearTimeout(deferTimer);
+    // Стрелки: запрос к серверу — после паузы, которая дольше задержки перед повторами
+    // при удержании, чтобы ответ не перерисовал страницу посреди движения.
+    if (defer) deferTimer = setTimeout(load, 600); else load();
   }
+  let deferTimer = 0;
 
   function setEditing(on) {
     state.editing = on;
@@ -580,14 +597,18 @@
     e.line = ln.s;
     e.fx = t.fx;
     e.fy = t.fy;
+    e.o = Date.now(); // перетащенный последним получает место, если аккорды налезают
     setEdit(id, e);
   }
 
   // ---------- Перетаскивание пальцем (с точностью до пикселя) ----------
   let drag = null;
   let edgeTimer = 0;
+  // При перетаскивании пальцем аккорд поднимается над пальцем (lift), иначе палец
+  // закрывает и аккорд, и место, куда он встанет.
+  const LIFT = 46;
   function dragTarget() {
-    return placeAt(drag.x - drag.gx, drag.y - drag.gy);
+    return placeAt(drag.x - drag.gx, drag.y - drag.gy - (drag.started ? drag.lift : 0));
   }
   // У верхнего и нижнего края экрана страница сама прокручивается.
   function edgeScroll() {
@@ -600,6 +621,21 @@
       else if (drag.y > barTop - 50) dy = 10;
       if (dy) { window.scrollBy(0, dy); showGhost(dragTarget(), drag.text); }
     }, 30);
+  }
+
+  // Аккорд под пальцем: зоны касания соседних аккордов перекрываются, поэтому
+  // из всех, чья зона под пальцем, берём ближайший к пальцу по самому тексту аккорда.
+  function chordAt(x, y) {
+    let best = null, bestD = Infinity;
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (!el.classList || !el.classList.contains("c") || !el.classList.contains("m")) continue;
+      const r = el.getBoundingClientRect();
+      const cx = Math.max(r.left + 7, Math.min(x, r.right - 7));
+      const cy = Math.max(r.top + 8, Math.min(y, r.bottom - 8));
+      const d = Math.hypot(x - cx, y - cy);
+      if (d < bestD) { bestD = d; best = el; }
+    }
+    return best;
   }
 
   $("sheet").addEventListener("pointerdown", (e) => {
@@ -619,10 +655,10 @@
       state.sel = id;
       haptic();
       const ln = state.lines[t.row];
-      setEdit(id, { d: ln.o + t.col, line: ln.s, fx: t.fx, fy: t.fy, text, at: state.shift });
+      setEdit(id, { d: ln.o + t.col, line: ln.s, fx: t.fx, fy: t.fy, text, at: state.shift, o: Date.now() });
       return;
     }
-    const span = e.target.closest(".c.m");
+    const span = chordAt(e.clientX, e.clientY);
     if (!span) return;
     e.preventDefault();
     const r = span.getBoundingClientRect();
@@ -630,10 +666,20 @@
       el: span, id: span.dataset.id, oc: parseInt(span.dataset.oc, 10), text: span.textContent,
       x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, started: false,
       // где внутри аккорда взялись пальцем — чтобы он не прыгал под пальцем
-      gx: e.clientX - r.left, gy: e.clientY - r.top,
+      // (r — с учётом зоны касания, поэтому берём положение самого текста аккорда)
+      gx: e.clientX - (r.left + 7), gy: e.clientY - (r.top + 8),
+      lift: e.pointerType === "touch" ? LIFT : 0,
     };
     span.setPointerCapture(e.pointerId);
   });
+
+  // iOS (и Telegram на нём) решает прокручивать страницу по touch-событиям, поэтому
+  // кроме touch-action явно отменяем их, пока палец на аккорде.
+  $("sheet").addEventListener("touchstart", (e) => {
+    const t = e.touches[0];
+    if (state.editing && (state.placing || (t && chordAt(t.clientX, t.clientY)))) e.preventDefault();
+  }, { passive: false });
+  $("sheet").addEventListener("touchmove", (e) => { if (drag) e.preventDefault(); }, { passive: false });
 
   $("sheet").addEventListener("pointermove", (e) => {
     if (!drag) return;
@@ -655,19 +701,23 @@
   function endDrag(e, cancel) {
     if (!drag) return;
     const d = drag;
-    drag = null;
     clearInterval(edgeTimer);
-    showGhost(null);
-    d.el.classList.remove("dragging");
     if (!d.started) {           // просто нажали — выбрать аккорд
+      drag = null;
       if (!cancel) { select(d.el); haptic(); }
       return;
     }
     d.x = e.clientX; d.y = e.clientY;
-    drag = d;
     const t = cancel ? null : dragTarget();
     drag = null;
-    if (!t) return;             // отпустили не над строкой аккордов — аккорд остаётся на месте
+    if (!t) {                   // отпустили не над строкой аккордов — аккорд остаётся на месте
+      showGhost(null);
+      d.el.classList.remove("dragging");
+      return;
+    }
+    // Копия аккорда остаётся на новом месте, пока сервер не пришлёт обновлённый текст
+    // (перерисовка уберёт её) — без прыжка аккорда назад при медленной сети.
+    showGhost(t, d.text);
     saveAt(d.id, d.oc, t);
   }
   $("sheet").addEventListener("pointerup", (e) => endDrag(e, false));
@@ -681,9 +731,16 @@
     let d = e.d || 0;
     while (fx > 0.5) { fx -= 1; d += 1; }
     while (fx < -0.5) { fx += 1; d -= 1; }
-    e.d = d; e.fx = fx;
+    e.d = d; e.fx = fx; e.o = Date.now();
     haptic();
-    setEdit(state.sel, e);
+    // Сразу сдвигаем аккорд на экране, а запрос к серверу — когда стрелку отпустят.
+    const el = document.querySelector(`#sheet .c[data-id="${state.sel}"]`);
+    if (el) {
+      const dx = d - parseInt(el.dataset.rd || "0", 10) + fx;
+      el.style.display = "inline-block";
+      el.style.transform = `translate(calc(var(--cw) * ${dx}), calc(var(--lh) * ${e.fy || 0}))`;
+    }
+    setEdit(state.sel, e, true);
   }
   // Удержание кнопки двигает аккорд дальше, пока её не отпустят.
   function holdRepeat(btn, fn) {
